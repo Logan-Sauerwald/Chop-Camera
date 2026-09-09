@@ -91,7 +91,7 @@ more than one camera per Pi.
 | ControlLogix PLC | 10.2.4.1 |
 | Node 1 | 10.2.4.100 |
 | Nodes 2–5 | 10.2.4.101–104 (planned) |
-| Aggregator | 10.2.4.200 (planned) |
+| Aggregator | 10.2.4.200 (planned; matches `AGG_IP` in the config) |
 
 Static IPs via NetworkManager, for example:
 

@@ -19,6 +19,8 @@ If you change something here and it breaks, the explanation is probably below.
 | H.264 clip size, 30 s @ 120 fps | **~60 MB** (16 Mbps) | `ffprobe` on a real clip |
 | MJPEG clip size, 30 s @ 120 fps | **~350 MB** | same clip before transcode |
 | USB bus | **USB 2.0, 480 Mbps, single shared hub** | `lsusb -t`, all four ports |
+| Default Linux pipe capacity | **64 KiB = ~4 ms of stream** | 118 Mbps / 65536 B; see "The capture pipe" |
+| Non-integer mux frame rates | **silently corrupt the timeline** | ffmpeg 6.1.1; see "Clips are muxed at a whole-number frame rate" |
 
 ### The 87 vs 120 fps trap
 
@@ -81,17 +83,133 @@ frames than the input. This guards against a silent 120→30 fps drop, which
 would produce a clean-looking file that has thrown away the slow-motion detail
 the entire system exists to capture.
 
+### The capture pipe is widened to 1 MiB
+
+`capture.py` reads MJPEG from ffmpeg over a pipe. Linux pipes default to
+64 KiB, which at the measured 118 Mbps is only **~4 ms** of stream. If the
+reader thread is descheduled for longer than that — a GC pause, a busy moment
+on the preview server, the GIL held elsewhere — ffmpeg blocks on write, v4l2
+backs up, and frames are dropped. `_widen_pipe()` raises it to 1 MiB
+(`F_SETPIPE_SZ`, the default unprivileged ceiling), which is ~70 ms of slack
+instead. This is why `Nice=-5` alone was never quite enough insurance.
+
+If it can't widen the pipe it logs a warning and carries on; `/proc/sys/fs/
+pipe-max-size` is the limit if you ever need more.
+
+### Clips are muxed at a whole-number frame rate
+
+The writer measures the real frame rate from the buffer's timestamps — it is
+never exactly 120 — but it rounds before handing it to ffmpeg, and that
+rounding is load-bearing.
+
+**ffmpeg's raw MJPEG demuxer silently corrupts the timeline for many
+non-integer input frame rates.** After about 51 frames it stops advancing PTS
+by a frame duration and starts incrementing by a single tick, so every
+remaining frame piles up at almost the same timestamp. A 30 s clip then reports
+a fraction of a second long and plays as a blur, with the frames all present
+and `nb_read_packets` correct — which is exactly the failure the frame-count
+guard in `postprocess.sh` cannot see.
+
+Measured on ffmpeg 6.1.1 with a 900-frame stream:
+
+| `-framerate` | Result |
+|---|---|
+| 120, 119.873, 60, 59.94, 30, 29.97, 15 | correct |
+| 125.75, 100.25, 90.5, 31.623, 30.5 | **PTS collapses at frame 52** |
+
+There is no warning and the exit status is 0. It is not the muxer — the broken
+timestamps come out of the demuxer, and MP4, NUT and AVI are all affected. An
+exact rational (`-framerate 401/4`) does not help, and neither does an output
+`-r`. Whole numbers are always correct.
+
+Rounding costs nothing: in the fractional cases that *did* work, ffmpeg had
+quantised to a whole number anyway (119.873 produced a 120 fps timeline), so
+the fraction was never buying accuracy. A 0.1 % speed error over a 30 s clip is
+0.03 s and irrelevant to chop review. The measured rate is kept in the clip
+metadata (`measured_fps=`) and in the journal line for anyone who needs it.
+
+This also makes `PLAYBACK_MODE="slowmo"` exact: `setpts=4.0*PTS -r 30` against
+a true 120 fps input is a clean 4×.
+
+### The PLC edge detector is seeded from the current value
+
+On connect the poll loop reads once and takes that as the baseline instead of
+assuming FALSE. A latched bit that is already TRUE when we reconnect after a
+network blip is not a new chop, and treating it as one wrote a phantom clip
+every time the link flapped. The log says `... is already TRUE at connect` when
+this happens.
+
+### Clip filenames are UTC by default
+
+`event_20260909_193012Z_chop1.mkv`. Five nodes recording the same chop have to
+be lined up on the aggregator, and local time is both ambiguous for one hour
+every autumn and not comparable across nodes whose clocks or DST state differ.
+`CLIP_TIMESTAMP="local"` gives wall-clock names instead, with the UTC offset
+kept so they stay unambiguous. **Run NTP on every node** — none of this helps
+if the clocks disagree.
+
+Every clip also carries `node=`, `trigger=`, `tag=`, frame count and real fps
+in its container metadata, so identity survives a rename on the aggregator
+(`ffprobe -show_entries format_tags`).
+
+### Clips are written to a .part name and renamed
+
+`capture.py` writes `.<name>.part.mkv` and renames on success. `postprocess.sh`
+globs `*.mkv`, which bash does not expand to dotfiles, so a half-written clip
+can never be picked up, and a crash mid-write leaves nothing that looks
+complete. Stage 0 of `postprocess.sh` clears `.part` files older than an hour
+(a mux takes ~0.1 s, so anything older is debris).
+
+### The service refuses to start on a bad config
+
+`validate_config()` runs before the camera is opened and checks the things that
+fail silently otherwise: a missing or unsafe `NODE_NAME`, an unknown
+`PLC_TYPE`, an unparseable Siemens address, no trigger source enabled at all.
+`--check-config` runs the same checks and exits.
+
+The motivating case is scale: nodes 2–5 get their config by copying node 1's
+and editing four values. `NODE_NAME` therefore ships **blank** — a node running
+under a copied name produces footage nobody can attribute to a chop point, and
+there is no way to tell after the fact. Better to refuse to boot.
+
+### /healthz exists because systemd cannot tell you this
+
+If the camera drops off, the capture thread logs a warning and retries every
+two seconds — forever — while `systemctl status` still shows the unit as
+`active`, because the service *is* running fine, it just has nothing to record.
+Same if the PLC config is bad: the poll thread stops and the unit stays green.
+
+`/healthz` returns 200 only when the camera has produced a frame in the last
+two seconds AND the PLC is connected (or the PLC trigger is switched off), and
+503 otherwise. It reports buffer depth, frame age, achieved poll rate, trigger
+count and clip count. The preview wall gets node status for free from the same
+endpoint it already fetches video from.
+
+### Library versions are pinned
+
+`pycomm3`, `python-snap7` and `pymodbus` are all pinned in `install.sh`.
+Verified against **pycomm3 1.2.16** and **python-snap7 3.1.2**. The PLC drivers
+are the hardest part of this system to test off-site; a major version bump
+discovered at a panel is the worst possible time to find out that `snap7.Area`
+moved. (It did move once already: `snap7.types.Areas` in 1.x, `snap7.Area` in
+3.x. `plc.py` tolerates both, but the pin is the real protection.)
+
 ### Two PLC families are supported
 
 Different lines here use different PLCs, so `src/plc.py` puts both behind one
 `TriggerSource` interface and `capture.py` polls it without caring which is on
 the other end. `PLC_TYPE` in the config selects the driver. Adding a third
-family means subclassing `TriggerSource` and registering it in
-`make_trigger_source()` — nothing in the capture path changes.
+family means subclassing `TriggerSource` and one `register_source()` call —
+nothing in the capture path changes, and the error message for an unknown
+`PLC_TYPE` lists whatever is registered.
 
 **Allen-Bradley ControlLogix / CompactLogix** — EtherNet/IP via `pycomm3`.
 Watches a named tag. Use `--list-tags` to find the real name: Rockwell output
 tags are frequently `...:O.Data.7` rather than `...:O.7`, or an alias.
+
+Point at a single **bit**. If the tag resolves to a DINT the trigger silently
+becomes "any nonzero value" and fires on unrelated data; the driver logs a
+warning saying so once, rather than letting it look like a PLC fault.
 
 **Siemens S7-300/400/1200/1500** — ISO-on-TCP (port 102) via `python-snap7`.
 Watches an absolute address: `DB100.DBX0.7`, `Q0.7`/`A0.7` (outputs),
@@ -113,7 +231,12 @@ Siemens specifics that cost time if you don't know them:
   byte addresses, so `DB100.DBX0.7` cannot resolve. Right-click the DB →
   Properties → uncheck "Optimized block access".
 - **Bit index is 0–7.** `parse_siemens_address` rejects anything higher rather
-  than letting a typo become a confusing read error at runtime.
+  than letting a typo become a confusing read error at runtime. `DB100.DBX0.8`
+  is really `DB100.DBX1.0`.
+- **`DB100.DBX0.7`, `DB100.DBB0.7` and `DB100.0.7` are the same bit.** The
+  short form was documented but did not actually parse until the unit tests
+  caught it — the old pattern made only the `X`/`B` optional, not the whole
+  `DB` token.
 
 A malformed address or unknown `PLC_TYPE` is a configuration error, not a
 transient one, so the poll loop logs it and **stops** instead of retrying
@@ -168,6 +291,26 @@ Options that were considered and rejected:
   becoming that holder.
 - **pymodbus is pinned to `>=3.8,<3.9`.** 3.9+ rewrote the datastore; the
   callback-datablock pattern the bench trigger uses no longer works there.
+- **The Modbus bench trigger binds loopback by default.** Anyone who can reach
+  the port can start a recording, so `MODBUS_BIND_IP="0.0.0.0"` is opt-in for
+  when you need to fire it from a laptop during commissioning.
+- **The config parser handles a subset of bash.** `KEY="value"`, `KEY=value`,
+  `export KEY=...` and trailing comments, all read identically by bash and by
+  `capture.py` (there is a test that compares the two readers key by key over
+  the shipped example). Variable expansion (`KEY="$OTHER/x"`), command
+  substitution and multi-line values are NOT supported by the Python side —
+  bash would read them and `capture.py` would not.
+- **`FPS` sizes the ring buffer.** Setting it below the camera's real rate
+  silently shortens the pre-roll, because the buffer is bounded by frame count.
+  The writer now logs `pre-roll short by Ns` when this bites, but the fix is to
+  set `FPS` to what the camera actually delivers.
+- **A clip still in its post-roll is lost if the service restarts.** The ring
+  buffer is RAM only, so a `systemctl restart` during the 15 s post-roll window
+  drops that clip. This is why `install.sh` does not restart the service for
+  you.
+- **Clocks must be synchronised.** Clip names and metadata are UTC, which only
+  helps correlate five nodes if all five agree on the time. Confirm `timedatectl`
+  shows NTP active on every node.
 - **`StartLimitIntervalSec` belongs in `[Unit]`.** systemd silently ignores it
   in `[Service]` — it looks correct and does nothing.
 - **Windows OpenSSH + admin accounts.** If the aggregator account is an
@@ -191,18 +334,24 @@ Options that were considered and rejected:
 ## Open items, roughly in order
 
 1. **Verify the PLC trigger against real hardware.** Neither driver has been
-   run against a live PLC. Start with `capture.py --test-trigger`, which
-   connects, prints the current value, and then watches for 10 s so you can
-   toggle the bit and see it change.
+   run against a live PLC. Start with `capture.py --check-config`, then
+   `capture.py --test-trigger 60`, which connects, names the CPU it reached,
+   and reports every transition plus a verdict on whether the pulses are wide
+   enough to catch. Non-zero exit means marginal or absent.
    - *ControlLogix:* run `--list-tags 156N0` first; the real tag may be
      `...:O.Data.7` or an alias. If connect times out but ping works, the PLC
      is in a chassis and `PLC_PATH` needs the CPU slot (`"10.2.4.1/1"`).
+     Watch for the `reads as DINT, not BOOL` warning — that means the tag is a
+     word and the trigger is really testing "nonzero".
    - *Siemens:* check rack/slot, PUT/GET permission, and that the DB is not
      "optimized" — see the PLC section above.
 2. **Confirm the trigger fires once per chop**, and that the chop lands near
-   the middle of the clip. If a fast chop is missed, the output pulse was
-   shorter than the ~33 ms poll interval — raise `POLL_HZ` or have controls
-   latch the bit.
+   the middle of the clip. `--test-trigger` now measures this directly: it
+   prints the width of every pulse and the poll rate it actually achieved, and
+   judges the margin against the achieved rate rather than the configured one
+   (a PLC that answers in 50 ms makes `POLL_HZ=30` a 20 Hz poll). If a fast
+   chop is missed, the pulse was shorter than the real poll interval — raise
+   `POLL_HZ` or have controls latch the bit.
 3. **Test the transfer end to end.** The PowerShell `Get-FileHash` call over
    SSH is written but untested; quoting through ssh → cmd → powershell is
    finicky. If the log shows `hash check failed (remote='empty')`, that's the
@@ -212,7 +361,9 @@ Options that were considered and rejected:
    node already serves MJPEG-over-HTTP, so a page with five `<img
    src="http://10.2.4.10X:8080/stream">` tags in Chromium kiosk mode is close
    to the whole job. Drop `LIVE_FPS` to 5–8 per node so the display isn't
-   decoding five full-rate streams.
+   decoding five full-rate streams. Poll each node's `/healthz` alongside it and
+   colour the tile — a grey tile with no explanation is the thing that wastes an
+   afternoon.
 5. **Storage.** ~7 GB/day across five nodes at one chop/hour. A 1 TB SSD holds
    ~5 months. Use an SSD, not an SD card — SD cards wear out under continuous
    writes and fail in ways that lose data.
@@ -220,6 +371,23 @@ Options that were considered and rejected:
    inspect); `slowmo` retimes to 30 fps so the clip *plays* at 4× slow motion in
    any player. If reviewers will just double-click the file, `slowmo` is
    probably what they want.
+
+## Running the tests
+
+```bash
+python3 -m unittest discover -s tests -v
+```
+
+No PLC, no camera, no PLC libraries. It covers Siemens address parsing, driver
+construction for every `PLC_TYPE` alias, config parsing (including a check that
+bash and `capture.py` read `chopcam.conf` identically), clip naming, JPEG frame
+splitting across arbitrary chunk boundaries, the clip mux against real ffmpeg
+output, and the `/healthz` gate. `install.sh` runs it on every install, which
+is also how a CRLF-damaged checkout gets caught before you are at the panel.
+
+The address-parsing tests exist because that is the only part of the trigger
+path that can be validated without hardware — and they immediately found a
+documented address form that never actually worked.
 
 ## If you only read one thing
 

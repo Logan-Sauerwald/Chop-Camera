@@ -72,10 +72,24 @@ frame_count() {
 }
 
 # ---------------------------------------------------------------------------
+# STAGE 0 -- clear crash debris
+# ---------------------------------------------------------------------------
+# capture.py writes each clip to ".<name>.part.mkv" and renames it into place,
+# and stage 1 below does the same with ".<name>.part.mp4". A crash or a kill
+# mid-write leaves the dot-prefixed file behind. Nothing ever legitimately
+# takes an hour to write (a clip mux is ~0.1 s), so anything older than that is
+# debris. This is crash hygiene, not retention -- no completed clip is touched.
+stale="$(find "$RAW_DIR" "$ENC_DIR" -maxdepth 1 -name '.*.part.*' -type f \
+         -mmin +60 -print -delete 2>/dev/null | wc -l)"
+[[ "$stale" -gt 0 ]] && log "cleared $stale abandoned .part file(s)"
+
+# ---------------------------------------------------------------------------
 # STAGE 1 -- transcode MJPEG -> H.264 (on this Pi)
 # ---------------------------------------------------------------------------
 shopt -s nullglob
 
+# NOTE: this glob does not match dotfiles, which is exactly what keeps a clip
+# capture.py is still writing (".<name>.part.mkv") out of the loop.
 for raw in "$RAW_DIR"/*.mkv; do
     base="$(basename "$raw" .mkv)"
     out="$ENC_DIR/${base}.mp4"
@@ -83,7 +97,8 @@ for raw in "$RAW_DIR"/*.mkv; do
 
     [[ -e "$out" ]] && { log "already encoded, skipping: $base"; continue; }
 
-    # Skip anything capture.py may still be writing.
+    # Belt and braces behind the .part naming above: skip anything touched in
+    # the last 30 s, in case a clip arrived here by some other route.
     if [[ -n "$(find "$raw" -mmin -0.5 2>/dev/null)" ]]; then
         log "still being written, will retry: $base"
         continue

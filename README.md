@@ -14,9 +14,11 @@ H.264 and collected on an aggregator for review in slow motion.
 |---|---|
 | Capture, ring buffer, clip writing | **working** |
 | Live preview (HTTP) | **working** |
+| Node health endpoint (`/healthz`) | **working** |
 | Modbus bench trigger | **working** |
 | Auto-start on boot, crash recovery | **working** |
 | H.264 transcode on a timer | **working** |
+| Config validation + unit tests | **working** |
 | PLC trigger — ControlLogix (EtherNet/IP) | **written, never tested against a real PLC** |
 | PLC trigger — Siemens S7 (ISO-on-TCP) | **written, never tested against a real PLC** |
 | Transfer to aggregator | **written, never tested end to end** |
@@ -70,6 +72,7 @@ src/capture.py         capture service (buffer, triggers, preview, clip writer)
 src/plc.py             PLC drivers: ControlLogix + Siemens behind one interface
 src/postprocess.sh     transcode, ship, purge
 systemd/               service + timer units
+tests/                 unit tests — run with no PLC and no camera attached
 docs/hardware.md       parts, measurements, camera and lens notes
 HANDOFF.md             design reasoning and open items — read this
 INSTALL.md             step-by-step deployment
@@ -80,13 +83,17 @@ INSTALL.md             step-by-step deployment
 ```bash
 git clone <repo> && cd chopcam
 sudo ./install.sh
-sudoedit /etc/chopcam.conf          # NODE_NAME, PLC_PATH, TRIGGER_TAG
+sudoedit /etc/chopcam.conf          # NODE_NAME, PLC_TYPE, PLC_PATH, TRIGGER_TAG
+/opt/chopcam/venv/bin/python /opt/chopcam/src/capture.py --check-config
 sudo systemctl enable --now chopcam.service
 sudo systemctl enable --now chopcam-postprocess.timer
 journalctl -u chopcam -f
 ```
 
-Live preview: `http://<pi>:8080/`
+Live preview: `http://<pi>:8080/` — node health: `http://<pi>:8080/healthz`
+
+The service refuses to start on a bad config rather than running half-working,
+so `--check-config` tells you everything wrong in one pass.
 
 Fire a test clip without the PLC:
 
@@ -113,5 +120,24 @@ PLC_TYPE="siemens"        TRIGGER_TAG="DB100.DBX0.7"   # + SIEMENS_RACK/SLOT
 Verify the trigger before starting the service — works for either family:
 
 ```bash
-/opt/chopcam/venv/bin/python /opt/chopcam/src/capture.py --test-trigger
+/opt/chopcam/venv/bin/python /opt/chopcam/src/capture.py --test-trigger 60
 ```
+
+That does more than prove the connection: it reports how wide the trigger
+pulses actually are and what poll rate the PLC really sustains, and fails with
+a non-zero exit if a pulse is too short to be caught reliably.
+
+Adding a *third* PLC family is a subclass of `TriggerSource` plus one
+`register_source()` call in `src/plc.py`. Nothing in the capture path changes.
+
+## Tests
+
+```bash
+python3 -m unittest discover -s tests -v
+```
+
+No PLC, no camera and no PLC libraries needed — the suite covers Siemens
+address parsing, driver construction for every `PLC_TYPE` alias, config
+parsing (including that bash and Python read `chopcam.conf` identically), clip
+naming, JPEG frame splitting, and the clip mux against real ffmpeg output.
+`install.sh` runs it on every install.

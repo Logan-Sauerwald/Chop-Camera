@@ -4,12 +4,19 @@
 # Copy to /etc/chopcam.conf and edit. Read by BOTH src/capture.py and
 # src/postprocess.sh, so the format must stay valid bash:
 #   KEY="value"   -- no spaces around '=', always quote values.
+# Trailing comments after a value are fine (both readers strip them).
 #
 # When adding nodes 2-5, THIS IS THE ONLY FILE THAT CHANGES.
+# After editing, check it before starting the service:
+#   /opt/chopcam/venv/bin/python /opt/chopcam/src/capture.py --check-config
 # ---------------------------------------------------------------------------
 
-# Identifies this node in clip filenames. Unique per Pi: chop1..chop5.
-NODE_NAME="chop1"
+# REQUIRED. Identifies this node in every clip filename and in the clip's
+# embedded metadata. Unique per Pi: chop1..chop5.
+# Deliberately blank in this example -- the service refuses to start until it
+# is set, because a node running under a copied name produces footage nobody
+# can trace back to a chop point.
+NODE_NAME=""
 
 # --- PLC trigger ------------------------------------------------------------
 PLC_TRIGGER="true"
@@ -18,6 +25,7 @@ PLC_TRIGGER="true"
 # this is per-node.
 #   controllogix  Allen-Bradley ControlLogix / CompactLogix (EtherNet/IP)
 #   siemens       Siemens S7-300/400/1200/1500 (ISO-on-TCP, port 102)
+# Aliases are accepted (ab, rockwell, logix, s7, simatic, tia, ...).
 PLC_TYPE="controllogix"
 
 # PLC address.
@@ -27,19 +35,24 @@ PLC_TYPE="controllogix"
 #   Siemens:      plain IP. Rack/slot go in SIEMENS_RACK / SIEMENS_SLOT below.
 PLC_PATH="10.2.4.1"
 
-# The boolean to watch. Syntax depends on PLC_TYPE.
+# REQUIRED when PLC_TRIGGER="true". The boolean to watch; syntax depends on
+# PLC_TYPE.
 #
 # ControlLogix -- a tag name. Rockwell output tags are often "...:O.Data.7"
 #   rather than "...:O.7", and may be an alias. Don't guess:
 #       capture.py --list-tags 156N0
-#   and paste the exact string it prints.
+#   and paste the exact string it prints. Point at a single BIT: if the tag
+#   resolves to a DINT the trigger becomes "any nonzero value" and capture.py
+#   logs a warning saying so.
 #
 # Siemens -- an absolute address. Supported forms:
 #       DB100.DBX0.7   data block 100, byte 0, bit 7
+#       DB100.DBB0.7   same thing
+#       DB100.0.7      same thing (short form)
 #       Q0.7  / A0.7   process output byte 0, bit 7  (EN / DE mnemonics)
 #       I3.2  / E3.2   process input
 #       M10.3          memory bit (merker / flag)
-#   Bit index must be 0-7.
+#   Bit index must be 0-7. A bad address is a startup error, not a runtime one.
 #
 # Each chop point has its OWN trigger. This is a per-node value.
 TRIGGER_TAG="_R1_156N0:33:O.7"
@@ -51,6 +64,10 @@ TRIGGER_TAG="_R1_156N0:33:O.7"
 SIEMENS_RACK="0"
 SIEMENS_SLOT="1"
 
+# ISO-on-TCP port. Effectively always 102; only change it for a gateway that
+# remaps the port.
+#SIEMENS_PORT="102"
+
 # TWO THINGS MUST BE SET IN TIA PORTAL or reads fail even though the TCP
 # connection succeeds:
 #   1. CPU properties -> Protection & Security -> "Permit access with PUT/GET
@@ -60,8 +77,13 @@ SIEMENS_SLOT="1"
 # Verify with:  capture.py --test-trigger
 
 # Tag reads per second. 30 Hz (~33 ms) catches any physical output energized
-# longer than a few tens of ms. If a chop is ever missed, raise this or ask
-# controls to latch the bit.
+# longer than a few tens of ms.
+#
+# This is a REQUEST, not a guarantee -- the real ceiling is how fast the PLC
+# answers. capture.py --test-trigger reports the rate it actually achieved and
+# the width of the pulses it saw, and the service logs a warning if it cannot
+# keep up. If a chop is ever missed, raise this or ask controls to latch the
+# bit.
 POLL_HZ="30"
 
 # --- Modbus bench trigger ---------------------------------------------------
@@ -69,7 +91,11 @@ POLL_HZ="30"
 # commissioning: it separates "PLC problem" from "camera problem" instantly.
 # Set "false" once the PLC trigger is confirmed in production.
 MODBUS_TEST_TRIGGER="true"
-MODBUS_BIND_IP="0.0.0.0"
+
+# Loopback by default, so only someone already on this Pi can fire a
+# recording. Set "0.0.0.0" if you need to trigger from a laptop during
+# commissioning -- that lets anyone on the plant network start a recording.
+MODBUS_BIND_IP="127.0.0.1"
 MODBUS_PORT="5020"
 MODBUS_TRIGGER_PDU="0"
 
@@ -78,12 +104,18 @@ MODBUS_TRIGGER_PDU="0"
 # of view than the sensor can see, but the only way to get 120 fps. Full-sensor
 # modes (2592x1944, 3840x3040) are wider but cap at 20-30 fps. See
 # docs/hardware.md before changing.
+#
+# FPS also sizes the ring buffer. Setting it BELOW the camera's real rate
+# silently shortens the pre-roll, so keep it at the rate the camera actually
+# delivers.
 CAMERA_DEVICE="/dev/video0"
 FRAME_WIDTH="1920"
 FRAME_HEIGHT="1080"
 FPS="120"
 
 # --- live preview -----------------------------------------------------------
+# Serves the preview page at /, the MJPEG stream at /stream, and node health as
+# JSON at /healthz (HTTP 200 healthy, 503 degraded).
 LIVE_FEED="true"
 LIVE_HOST="0.0.0.0"
 LIVE_PORT="8080"
@@ -95,6 +127,16 @@ LIVE_FPS="15"
 # Seconds kept before / after the trigger. 15+15 at 120 fps = ~3600 frames.
 PRE_SECONDS="15"
 POST_SECONDS="15"
+
+# Timestamp used in clip filenames.
+#   utc   -> event_20260909_193012Z_chop1.mkv
+#            Unambiguous and directly comparable across nodes, which is what
+#            lets you line up five cameras on the same chop.
+#   local -> event_20260909_143012-0500_chop1.mkv
+#            Wall-clock, with the UTC offset kept so the autumn DST hour is
+#            still unambiguous.
+# Either way the clip carries node, trigger source and tag in its metadata.
+CLIP_TIMESTAMP="utc"
 
 # --- storage ----------------------------------------------------------------
 STATE_DIR="/var/lib/chopcam"
@@ -123,7 +165,7 @@ SHIP_ENABLED="false"
 # Used only when SHIP_ENABLED="true". Forward slashes work for both a Windows
 # scp target and a Linux one.
 AGG_USER="lsauerwald"
-AGG_IP="10.2.4.50"
+AGG_IP="10.2.4.200"
 AGG_DIR="C:/Users/lsauerwald/Downloads/Chop_vids"
 
 # How delivery is confirmed before the local copy is set aside:
