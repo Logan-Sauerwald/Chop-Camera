@@ -177,6 +177,51 @@ class TestValidation(unittest.TestCase):
         self.assertIn("No config found", res.stdout + res.stderr)
 
 
+class TestMemoryBudget(unittest.TestCase):
+    """The ring buffer's byte ceiling has to fit inside systemd's MemoryMax,
+    or the service is OOM-killed on the first busy scene instead of saying so.
+    """
+
+    def setUp(self):
+        self._mb = capture.BUFFER_MAX_MB
+        self._limit = capture._cgroup_memory_limit_bytes
+
+    def tearDown(self):
+        capture.BUFFER_MAX_MB = self._mb
+        capture._cgroup_memory_limit_bytes = self._limit
+
+    def _warn(self, mb, limit_mb):
+        capture.BUFFER_MAX_MB = mb
+        capture._cgroup_memory_limit_bytes = (
+            lambda: None if limit_mb is None else limit_mb * 1024 * 1024)
+        return capture.config_warnings()
+
+    def test_default_budget_fits_the_shipped_memorymax(self):
+        # chopcam.service sets MemoryMax=1500M; the 31 s default must fit.
+        self.assertEqual(self._warn(620, 1500), [])
+
+    def test_budget_too_close_to_the_limit_warns(self):
+        warnings = self._warn(1400, 1500)
+        self.assertTrue(warnings)
+        self.assertIn("MemoryMax", warnings[0])
+
+    def test_budget_below_the_measured_peak_warns(self):
+        # 118 Mbps over a 31 s window is ~457 MB.
+        warnings = self._warn(100, 1500)
+        self.assertTrue(warnings)
+        self.assertIn("below", warnings[0])
+
+    def test_no_cgroup_limit_means_no_memorymax_warning(self):
+        # Running outside systemd (a bench run) must not invent a warning.
+        self.assertEqual(self._warn(9000, None), [])
+
+    def test_cgroup_reader_tolerates_a_missing_or_unlimited_cgroup(self):
+        # Must return None rather than raising, whatever the machine looks
+        # like -- it runs on every startup.
+        val = capture._cgroup_memory_limit_bytes()
+        self.assertTrue(val is None or (isinstance(val, int) and val > 0))
+
+
 class TestBothReadersAgree(unittest.TestCase):
     """chopcam.conf is read twice: bash `source` in postprocess.sh and the
     parser in capture.py. If they ever disagree about a value, one half of the

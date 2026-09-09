@@ -196,17 +196,104 @@ log = logging.getLogger("chopcam")
 # once the PLC reconnect loop is running. Warnings and errors still come through.
 logging.getLogger("snap7").setLevel(logging.WARNING)
 
-# Ring buffer of (monotonic_ts, jpeg_bytes). maxlen self-trims, so RAM is
-# bounded. At 120 fps / 30 s this is ~3720 frames, roughly 400-460 MB.
-#
-# The +FPS is one second of slack past PRE+POST. It exists because the writer
-# snapshots the buffer POST_SECONDS after the trigger, by which time the oldest
-# frame it still needs is PRE+POST seconds old. If the camera ever delivers
-# MORE frames per second than FPS says, that slack shrinks and the pre-roll is
-# silently truncated -- so FPS must not be set below the camera's actual rate.
-_BUF_LEN = int(FPS * (PRE_SECONDS + POST_SECONDS)) + FPS
-frame_buffer = deque(maxlen=_BUF_LEN)
-buffer_lock = threading.Lock()
+# One second of slack past PRE+POST: the writer snapshots the buffer
+# POST_SECONDS after the trigger, so the oldest frame it still needs is
+# PRE+POST seconds old by then.
+BUFFER_SECONDS = PRE_SECONDS + POST_SECONDS + 1
+
+# Hard memory ceiling for the ring. Defaults to the window's worth of frames at
+# 20 MB/s -- comfortably above the 118 Mbps (14.75 MB/s) peak measured on this
+# camera -- so in normal running the TIME bound is what trims the buffer and
+# this never binds. It exists to keep a fatter-than-expected stream from
+# pushing the service into systemd's MemoryMax.
+BUFFER_MAX_MB = _i("BUFFER_MAX_MB", max(64, int(BUFFER_SECONDS * 20)))
+
+
+class FrameRing:
+    """Ring buffer of (monotonic_ts, jpeg_bytes), bounded by TIME and BYTES.
+
+    Bounding by time is the point. The buffer used to be a deque with
+    maxlen=FPS*(PRE+POST), which assumed the configured FPS matched what the
+    camera actually delivered. Set FPS below the real rate and the deque held
+    fewer seconds than PRE+POST, so the pre-roll was silently truncated -- the
+    clip looked fine and simply did not reach back far enough to show what led
+    into the chop. Trimming on the timestamps we already store removes the
+    assumption: the window is PRE+POST+1 seconds whatever rate the camera runs
+    at, and FPS is only a request to the camera.
+
+    The byte ceiling is the backstop that maxlen used to provide. When it is
+    what evicts a frame -- i.e. the stream is fatter than the budget allows --
+    the pre-roll really is short, so that is reported rather than hidden.
+    """
+
+    def __init__(self, seconds, max_bytes):
+        self.seconds = seconds
+        self.max_bytes = max_bytes
+        self._frames = deque()
+        self._bytes = 0
+        self._lock = threading.Lock()
+        self.memory_evictions = 0        # frames dropped while still in-window
+        self._last_warned = 0.0
+
+    def _evict(self):
+        self._bytes -= len(self._frames.popleft()[1])
+
+    def append(self, ts, jpg):
+        with self._lock:
+            self._frames.append((ts, jpg))
+            self._bytes += len(jpg)
+
+            cutoff = ts - self.seconds
+            while self._frames and self._frames[0][0] < cutoff:
+                self._evict()
+
+            # Anything evicted below here was still inside the time window.
+            over = 0
+            while self._bytes > self.max_bytes and len(self._frames) > 1:
+                self._evict()
+                over += 1
+            if over:
+                self.memory_evictions += over
+                if ts - self._last_warned > 300:
+                    self._last_warned = ts
+                    log.warning(
+                        "ring buffer hit its %d MB ceiling and is dropping "
+                        "frames that are still inside the %.0fs window -- the "
+                        "pre-roll will be short. The stream is fatter than "
+                        "budgeted (raise BUFFER_MAX_MB, and MemoryMax= in "
+                        "chopcam.service to match), or PRE_SECONDS/"
+                        "POST_SECONDS are too long for this Pi.",
+                        self.max_bytes // (1024 * 1024), self.seconds)
+
+    def snapshot(self):
+        """Copy of the current contents. Copies references, not JPEG bytes."""
+        with self._lock:
+            return list(self._frames)
+
+    def latest(self):
+        with self._lock:
+            return self._frames[-1] if self._frames else None
+
+    def stats(self):
+        with self._lock:
+            n = len(self._frames)
+            oldest = self._frames[0][0] if n else 0.0
+            newest = self._frames[-1][0] if n else 0.0
+            return {"frames": n, "bytes": self._bytes,
+                    "seconds": (newest - oldest) if n > 1 else 0.0,
+                    "memory_evictions": self.memory_evictions}
+
+    def clear(self):
+        with self._lock:
+            self._frames.clear()
+            self._bytes = 0
+
+    def __len__(self):
+        with self._lock:
+            return len(self._frames)
+
+
+frame_buffer = FrameRing(BUFFER_SECONDS, BUFFER_MAX_MB * 1024 * 1024)
 
 trigger_q: "Queue[tuple[float, datetime, str]]" = Queue()
 _stop = threading.Event()
@@ -310,6 +397,55 @@ def validate_config():
     return problems
 
 
+def _cgroup_memory_limit_bytes():
+    """The cgroup memory ceiling this process runs under, or None.
+
+    Under systemd this is MemoryMax= from chopcam.service. Reading it lets the
+    service say up front that its ring buffer budget does not fit, instead of
+    being OOM-killed at the first busy scene.
+    """
+    for path in ("/sys/fs/cgroup/memory.max",                     # cgroup v2
+                 "/sys/fs/cgroup/memory/memory.limit_in_bytes"):  # cgroup v1
+        try:
+            with open(path) as fh:
+                raw = fh.read().strip()
+        except OSError:
+            continue
+        if raw in ("max", ""):
+            return None
+        try:
+            val = int(raw)
+        except ValueError:
+            continue
+        if 0 < val < (1 << 62):     # v1 writes a huge sentinel for "no limit"
+            return val
+    return None
+
+
+def config_warnings():
+    """Non-fatal problems worth saying out loud at startup."""
+    warnings = []
+    budget = BUFFER_MAX_MB * 1024 * 1024
+    limit = _cgroup_memory_limit_bytes()
+    if limit and budget > limit * 0.6:
+        warnings.append(
+            f"BUFFER_MAX_MB={BUFFER_MAX_MB} allows a ring buffer of "
+            f"{budget / 1048576:.0f} MB, but this service is capped at "
+            f"{limit / 1048576:.0f} MB (MemoryMax= in chopcam.service). Leave "
+            f"room for the interpreter and ffmpeg: raise MemoryMax to at least "
+            f"{int(budget / 1048576 / 0.6)}M, or shorten "
+            f"PRE_SECONDS/POST_SECONDS."
+        )
+    expected = BUFFER_SECONDS * 14.75      # measured 118 Mbps peak
+    if BUFFER_MAX_MB < expected:
+        warnings.append(
+            f"BUFFER_MAX_MB={BUFFER_MAX_MB} is below the ~{expected:.0f} MB a "
+            f"{BUFFER_SECONDS}s window needs at the measured 118 Mbps peak. "
+            "The pre-roll will be short on detailed scenes."
+        )
+    return warnings
+
+
 def log_effective_config():
     """One block in the journal saying what the service actually believes.
 
@@ -319,9 +455,11 @@ def log_effective_config():
     """
     log.info("chopcam node %s | config %s | clips -> %s",
              NODE_NAME, C.get("_path"), OUTPUT_DIR)
-    log.info("  camera : %s %dx%d @ %d fps  (buffer %d frames, %ds)",
-             CAMERA_DEVICE, FRAME_WIDTH, FRAME_HEIGHT, FPS, _BUF_LEN,
-             PRE_SECONDS + POST_SECONDS + 1)
+    log.info("  camera : %s %dx%d @ %d fps requested",
+             CAMERA_DEVICE, FRAME_WIDTH, FRAME_HEIGHT, FPS)
+    log.info("  buffer : %ds window, %d MB ceiling  (~%.0f MB expected at "
+             "120 fps / 118 Mbps)",
+             BUFFER_SECONDS, BUFFER_MAX_MB, BUFFER_SECONDS * 14.75)
     log.info("  clip   : -%ds / +%ds, encode=%s, timestamps=%s",
              PRE_SECONDS, POST_SECONDS, ENCODE, CLIP_TIMESTAMP)
     if PLC_TRIGGER:
@@ -331,7 +469,7 @@ def log_effective_config():
         log.info("  plc    : disabled")
     log.info("  modbus : %s", f"{MODBUS_BIND_IP}:{MODBUS_PORT} "
              f"coil PDU {MODBUS_TRIGGER_PDU}" if MODBUS_TEST_TRIGGER else "disabled")
-    for msg in _early_warnings:
+    for msg in _early_warnings + config_warnings():
         log.warning("config: %s", msg)
     # Keys silently taking a built-in default are usually typos in the file.
     interesting = [k for k in _defaulted
@@ -682,10 +820,7 @@ def _live_page():
 def health_snapshot():
     """Node status for /healthz. Cheap enough to serve on every request."""
     now = time.monotonic()
-    with buffer_lock:
-        n = len(frame_buffer)
-        oldest = frame_buffer[0][0] if n else 0.0
-        newest = frame_buffer[-1][0] if n else 0.0
+    ring = frame_buffer.stats()
     with _status_lock:
         st = dict(_status)
 
@@ -693,10 +828,14 @@ def health_snapshot():
     # Two seconds without a frame at 120 fps means the camera is gone, not slow.
     camera_ok = frame_age is not None and frame_age < 2.0
     plc_ok = (not PLC_TRIGGER) or st["plc_state"] == "connected"
+    # Once running, the ring should span its whole window. Falling short means
+    # the byte ceiling is binding and clips will have a truncated pre-roll.
+    buffer_ok = (ring["memory_evictions"] == 0
+                 or ring["seconds"] >= PRE_SECONDS + POST_SECONDS)
 
     return {
         "node": NODE_NAME,
-        "healthy": bool(camera_ok and plc_ok),
+        "healthy": bool(camera_ok and plc_ok and buffer_ok),
         "uptime_s": round(now - _started_mono, 1),
         "utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "camera": {
@@ -709,9 +848,14 @@ def health_snapshot():
             "configured_fps": FPS,
         },
         "buffer": {
-            "frames": n,
-            "capacity": _BUF_LEN,
-            "seconds": round(newest - oldest, 2) if n > 1 else 0.0,
+            "frames": ring["frames"],
+            "mb": round(ring["bytes"] / (1024 * 1024), 1),
+            "max_mb": BUFFER_MAX_MB,
+            "seconds": round(ring["seconds"], 2),
+            "window_seconds": BUFFER_SECONDS,
+            # Non-zero means the byte ceiling, not the time window, is what
+            # trimmed the buffer -- the pre-roll is genuinely short.
+            "memory_evictions": ring["memory_evictions"],
         },
         "plc": {
             "enabled": PLC_TRIGGER,
@@ -777,8 +921,7 @@ class LiveHandler(BaseHTTPRequestHandler):
             try:
                 while not _stop.is_set():
                     t0 = time.monotonic()
-                    with buffer_lock:
-                        entry = frame_buffer[-1] if frame_buffer else None
+                    entry = frame_buffer.latest()
                     # Don't resend the same frame: on a stalled camera this
                     # would spin at LIVE_FPS pushing identical bytes.
                     if entry is not None and entry[0] != last_sent:
@@ -913,8 +1056,7 @@ def capture_loop():
                 buf.extend(chunk)
                 for frame in extract_jpeg_frames(buf):
                     now = time.monotonic()
-                    with buffer_lock:
-                        frame_buffer.append((now, frame))
+                    frame_buffer.append(now, frame)
                     with _status_lock:
                         _status["camera_last_frame_mono"] = now
                         _status["camera_frames"] += 1
@@ -969,9 +1111,8 @@ def writer_loop():
         while time.monotonic() < end and not _stop.is_set():
             time.sleep(0.1)
 
-        # Cheap: list() copies references to JPEG bytes already in RAM.
-        with buffer_lock:
-            snap = list(frame_buffer)
+        # Cheap: copies references to JPEG bytes already in RAM.
+        snap = frame_buffer.snapshot()
 
         lo, hi = t_mono - PRE_SECONDS, t_mono + POST_SECONDS
         clip = [(ts, jpg) for ts, jpg in snap if lo <= ts <= hi]
@@ -1141,12 +1282,15 @@ if __name__ == "__main__":
             for item in issues:
                 print(f"  * {item}")
             sys.exit(1)
+        for warn in config_warnings():
+            print(f"  ! {warn}")
         print(f"{C.get('_path')}: OK")
         print(f"  node   : {NODE_NAME}")
         print(f"  plc    : {PLC_TYPE} {PLC_PATH} tag {TRIGGER_TAG} @ {POLL_HZ} Hz"
               if PLC_TRIGGER else "  plc    : disabled")
         print(f"  camera : {CAMERA_DEVICE} {FRAME_WIDTH}x{FRAME_HEIGHT} @ {FPS}")
         print(f"  clip   : -{PRE_SECONDS}s/+{POST_SECONDS}s -> {OUTPUT_DIR}")
+        print(f"  buffer : {BUFFER_SECONDS}s window, {BUFFER_MAX_MB} MB ceiling")
         sys.exit(0)
     if "--test-trigger" in sys.argv:
         raw = _argv_value("--test-trigger", "30")

@@ -21,6 +21,8 @@ If you change something here and it breaks, the explanation is probably below.
 | USB bus | **USB 2.0, 480 Mbps, single shared hub** | `lsusb -t`, all four ports |
 | Default Linux pipe capacity | **64 KiB = ~4 ms of stream** | 118 Mbps / 65536 B; see "The capture pipe" |
 | Non-integer mux frame rates | **silently corrupt the timeline** | ffmpeg 6.1.1; see "Clips are muxed at a whole-number frame rate" |
+| Ring buffer, 1080p120, 31 s window | **3721 frames, 436 MB** | measured steady state; matches the ~400 MB estimate above |
+| Ring buffer append cost | **0.9 µs/frame** | 14400 appends of 123 KB; 0.01% of the 8.3 ms budget at 120 fps |
 
 ### The 87 vs 120 fps trap
 
@@ -38,8 +40,56 @@ camera.
 
 The ring buffer stores JPEG bytes, never decoded arrays. A decoded 1080p frame
 is ~6 MB; at 120 fps for 30 s that would be **over 200 GB**. As JPEG it is
-~400 MB. This is why `cv2.VideoCapture` is not used — it decodes every frame
-and throws the JPEG away.
+~436 MB measured. This is why `cv2.VideoCapture` is not used — it decodes every
+frame and throws the JPEG away.
+
+### The ring buffer is bounded by time, not frame count
+
+The buffer trims on the timestamps it already stores, keeping
+`PRE + POST + 1` seconds whatever rate the camera actually runs at.
+
+It used to be a `deque(maxlen=FPS * (PRE + POST) + FPS)`, which quietly assumed
+the configured `FPS` matched reality. It does not have to: `FPS` is a *request*
+to the camera, and v4l2 is free to give you something else — and the 87-vs-120
+trap above is exactly a case where the real rate is not the configured one. Set
+`FPS="60"` on a camera delivering 120 and the deque held 1860 frames, which at
+the real rate is **15.5 seconds of a 31 second window**. Every clip then had
+roughly half the pre-roll it claimed, with nothing in the log and a
+correct-looking file — the failure this system exists to prevent, caused by one
+wrong number in a config file.
+
+Measured, feeding a minute of frames at the *real* rate into both designs
+(window 31 s):
+
+| Configured `FPS` | Real rate | Old `maxlen` deque | Time-bounded ring |
+|---|---|---|---|
+| 120 | 120 | 31.0 s | 31.0 s |
+| 60 | 120 | **15.5 s** | 31.0 s |
+| 30 | 120 | **7.7 s** | 31.0 s |
+| 120 | 87 | **42.7 s** (~630 MB) | 31.0 s |
+
+The last row is the same bug in the other direction, and it is the case the
+87-vs-120 trap actually produces: with `FPS="120"` configured and the camera
+decode-limited to 87, the old buffer held 42.7 s instead of 31 — about 630 MB
+rather than 436 MB, quietly spending 45% more of the `MemoryMax` headroom than
+anyone intended. Time bounding fixes both directions at once.
+
+A second bound caps the buffer in **bytes** (`BUFFER_MAX_MB`, default
+20 MB/s × the window = 620 MB at 15+15). That is what `maxlen` was really
+providing: protection against a stream fatter than expected pushing the service
+into systemd's `MemoryMax`. Measured steady state at 1080p120 is 3721 frames /
+436 MB over 31 s, so the byte ceiling has ~40% headroom and never binds in
+normal running — the time bound is what trims.
+
+When the byte ceiling *does* evict a frame that was still inside the time
+window, the pre-roll genuinely is short. That is reported, not hidden: a
+throttled warning in the journal, `buffer.memory_evictions` in `/healthz`, and
+the node reports unhealthy. `capture.py` also reads the service's cgroup memory
+limit at startup and warns if `BUFFER_MAX_MB` is too close to it, so lengthening
+`PRE_SECONDS`/`POST_SECONDS` without raising `MemoryMax=` says so up front
+instead of being OOM-killed on the first busy scene.
+
+Appending costs 0.9 µs per frame, against an 8.3 ms budget at 120 fps.
 
 ### Encoding is deferred, not skipped
 
@@ -300,10 +350,10 @@ Options that were considered and rejected:
   the shipped example). Variable expansion (`KEY="$OTHER/x"`), command
   substitution and multi-line values are NOT supported by the Python side —
   bash would read them and `capture.py` would not.
-- **`FPS` sizes the ring buffer.** Setting it below the camera's real rate
-  silently shortens the pre-roll, because the buffer is bounded by frame count.
-  The writer now logs `pre-roll short by Ns` when this bites, but the fix is to
-  set `FPS` to what the camera actually delivers.
+- **`FPS` is only a request to the camera.** It no longer sizes the ring
+  buffer (see "The ring buffer is bounded by time, not frame count"), so
+  getting it wrong cannot shorten the pre-roll any more. It must still name a
+  mode the camera actually supports, or capture will not start.
 - **A clip still in its post-roll is lost if the service restarts.** The ring
   buffer is RAM only, so a `systemctl restart` during the 15 s post-roll window
   drops that clip. This is why `install.sh` does not restart the service for

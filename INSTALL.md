@@ -188,7 +188,7 @@ service is running fine, it just has nothing to record.
   "node": "chop1",
   "healthy": true,
   "camera": { "state": "streaming", "frame_age_s": 0.01, "restarts": 0 },
-  "buffer": { "frames": 3720, "seconds": 31.0 },
+  "buffer": { "frames": 3721, "mb": 436.0, "seconds": 31.0, "memory_evictions": 0 },
   "plc": { "state": "connected", "poll_hz": 29.9, "configured_poll_hz": 30 },
   "triggers": { "count": 4, "last_utc": "2026-09-09T19:30:12+00:00" },
   "clips": { "written": 4, "failed": 0 }
@@ -285,7 +285,8 @@ ssh -o BatchMode=yes user@10.2.4.200 "powershell -NoProfile -Command \"echo ok\"
 | `tag ... reads as DINT, not BOOL` | `TRIGGER_TAG` points at a word, not a bit — append the bit index, e.g. `...:O.Data.7` |
 | `PLC polling at N Hz, configured M Hz` | the PLC can't answer that fast; lower `POLL_HZ` or latch the bit |
 | `... is already TRUE at connect` | normal after a reconnect on a latched bit; no phantom clip is recorded |
-| `pre-roll short by Ns` | the buffer didn't reach back `PRE_SECONDS` — `FPS` is probably set below the camera's real rate |
+| `pre-roll short by Ns` | normal for a trigger in the first seconds after start; otherwise the ring hit `BUFFER_MAX_MB` — check `buffer.memory_evictions` in `/healthz` |
+| `ring buffer hit its N MB ceiling` | the stream is fatter than budgeted; raise `BUFFER_MAX_MB` *and* `MemoryMax=` in `chopcam.service` |
 | `/healthz` returns 503 | camera stalled or PLC disconnected; the JSON says which |
 | `hash check failed (remote='empty')` | PowerShell quoting; set `VERIFY_MODE="size"` |
 | Disk filling | `SHIP_ENABLED="false"` keeps every clip forever; copy them off and delete |

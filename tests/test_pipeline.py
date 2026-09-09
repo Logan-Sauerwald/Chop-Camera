@@ -187,6 +187,93 @@ class TestMux(unittest.TestCase):
         self.assertEqual(glob.glob(os.path.join(self.out, "*.mkv")), [])
 
 
+class TestFrameRing(unittest.TestCase):
+    """The ring is bounded by TIME, not by a frame count derived from the
+    configured FPS. That is the whole point: FPS set below the camera's real
+    rate used to shrink the buffer below PRE+POST seconds and silently
+    truncate the pre-roll of every clip.
+    """
+
+    def test_holds_the_full_window_regardless_of_frame_rate(self):
+        # 30 s window; feed it at 30, 120 and 400 fps. All must retain 30 s.
+        for rate in (30, 120, 400):
+            ring = capture.FrameRing(seconds=30, max_bytes=512 * 1024 * 1024)
+            for i in range(rate * 40):            # 40 s of frames
+                ring.append(i / rate, b"x" * 1000)
+            st = ring.stats()
+            self.assertGreaterEqual(st["seconds"], 29.9, f"{rate} fps")
+            self.assertEqual(st["memory_evictions"], 0, f"{rate} fps")
+
+    def test_underconfigured_fps_no_longer_shortens_the_window(self):
+        # The original bug: FPS=60 configured, camera really delivering 120.
+        # A count-bounded deque of 60*(15+15)+60 = 1860 frames would have held
+        # only 15.5 s of a 31 s window. Time bounding is immune.
+        ring = capture.FrameRing(seconds=31, max_bytes=512 * 1024 * 1024)
+        for i in range(120 * 40):
+            ring.append(i / 120.0, b"x" * 1000)
+        self.assertGreaterEqual(ring.stats()["seconds"], 30.9)
+
+    def test_trims_old_frames(self):
+        ring = capture.FrameRing(seconds=5, max_bytes=512 * 1024 * 1024)
+        for i in range(1000):
+            ring.append(i / 100.0, b"x" * 100)
+        st = ring.stats()
+        self.assertLessEqual(st["seconds"], 5.01)
+        self.assertLess(st["frames"], 1000)
+
+    def test_byte_ceiling_bounds_memory_and_is_reported(self):
+        # A stream fatter than the budget must not grow without limit, and the
+        # truncation must be visible rather than silent.
+        ring = capture.FrameRing(seconds=3600, max_bytes=1 * 1024 * 1024)
+        for i in range(500):
+            ring.append(i / 100.0, b"x" * 10000)          # 5 MB total
+        st = ring.stats()
+        self.assertLessEqual(st["bytes"], 1024 * 1024)
+        self.assertGreater(st["memory_evictions"], 0)
+
+    def test_never_empties_completely(self):
+        # Even a single frame larger than the ceiling stays, so the preview
+        # and the health check still have something to report.
+        ring = capture.FrameRing(seconds=3600, max_bytes=1024)
+        ring.append(0.0, b"x" * 50000)
+        ring.append(1.0, b"x" * 50000)
+        self.assertEqual(ring.stats()["frames"], 1)
+        self.assertIsNotNone(ring.latest())
+
+    def test_byte_accounting_stays_exact(self):
+        ring = capture.FrameRing(seconds=10, max_bytes=512 * 1024 * 1024)
+        for i in range(300):
+            ring.append(i / 30.0, b"x" * (100 + i))
+        expected = sum(len(f[1]) for f in ring.snapshot())
+        self.assertEqual(ring.stats()["bytes"], expected)
+
+    def test_snapshot_and_latest(self):
+        ring = capture.FrameRing(seconds=10, max_bytes=512 * 1024 * 1024)
+        self.assertIsNone(ring.latest())
+        self.assertEqual(ring.snapshot(), [])
+        ring.append(1.0, b"a")
+        ring.append(2.0, b"b")
+        self.assertEqual(ring.latest(), (2.0, b"b"))
+        self.assertEqual([f[1] for f in ring.snapshot()], [b"a", b"b"])
+
+    def test_concurrent_appends_do_not_corrupt_accounting(self):
+        import threading as _t
+        ring = capture.FrameRing(seconds=3600, max_bytes=512 * 1024 * 1024)
+
+        def writer(base):
+            for i in range(500):
+                ring.append(base + i / 1000.0, b"x" * 64)
+
+        threads = [_t.Thread(target=writer, args=(t * 10.0,)) for t in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        st = ring.stats()
+        self.assertEqual(st["frames"], 2000)
+        self.assertEqual(st["bytes"], 2000 * 64)
+
+
 class TestHealth(unittest.TestCase):
     """The /healthz gate: a node is healthy only when the camera is delivering
     frames AND (the PLC is connected OR the PLC trigger is switched off).
@@ -206,12 +293,10 @@ class TestHealth(unittest.TestCase):
         with capture._status_lock:
             capture._status.clear()
             capture._status.update(self._saved[1])
-        with capture.buffer_lock:
-            capture.frame_buffer.clear()
+        capture.frame_buffer.clear()
 
     def _frame(self, age_s):
-        with capture.buffer_lock:
-            capture.frame_buffer.append((self.now - age_s, b"\xff\xd8\xff\xd9"))
+        capture.frame_buffer.append(self.now - age_s, b"\xff\xd8\xff\xd9")
         with capture._status_lock:
             capture._status["camera_frames"] = 1
             capture._status["camera_last_frame_mono"] = self.now - age_s

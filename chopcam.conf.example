@@ -105,9 +105,11 @@ MODBUS_TRIGGER_PDU="0"
 # modes (2592x1944, 3840x3040) are wider but cap at 20-30 fps. See
 # docs/hardware.md before changing.
 #
-# FPS also sizes the ring buffer. Setting it BELOW the camera's real rate
-# silently shortens the pre-roll, so keep it at the rate the camera actually
-# delivers.
+# FPS is the rate REQUESTED from the camera, nothing more. The ring buffer is
+# bounded by time and by bytes, so getting this wrong no longer shortens the
+# pre-roll -- but the camera must actually support the mode, or capture will
+# not start. Check with:
+#   v4l2-ctl -d /dev/video0 --list-formats-ext | grep -A4 MJPG
 CAMERA_DEVICE="/dev/video0"
 FRAME_WIDTH="1920"
 FRAME_HEIGHT="1080"
@@ -137,6 +139,20 @@ POST_SECONDS="15"
 #            still unambiguous.
 # Either way the clip carries node, trigger source and tag in its metadata.
 CLIP_TIMESTAMP="utc"
+
+# Hard memory ceiling for the in-RAM ring buffer, in MB. The buffer normally
+# trims on TIME (PRE + POST + 1 s), and this only binds if the stream is fatter
+# than budgeted -- so leaving it unset is right for almost everyone.
+#
+# Default: 20 MB/s x the window, i.e. 620 MB at 15+15 s. That is comfortably
+# above the 118 Mbps (14.75 MB/s) peak measured on this camera, which fills
+# ~436 MB of a 31 s window.
+#
+# If you raise it, raise MemoryMax= in chopcam.service to match -- the service
+# warns at startup when the two disagree. If the ceiling ever starts evicting
+# frames the pre-roll goes short, and /healthz reports it rather than hiding it
+# (buffer.memory_evictions).
+#BUFFER_MAX_MB="620"
 
 # --- storage ----------------------------------------------------------------
 STATE_DIR="/var/lib/chopcam"
