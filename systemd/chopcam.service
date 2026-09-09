@@ -1,0 +1,59 @@
+[Unit]
+Description=chopcam - rolling video buffer, PLC trigger, live preview
+Documentation=file:/opt/chopcam/README.md
+After=network-online.target
+Wants=network-online.target
+
+# If it crashes 5 times in 5 minutes, stop and leave the unit visibly failed
+# rather than looping forever.
+# NOTE: these MUST be in [Unit]. systemd silently ignores them in [Service],
+# which looks correct and does nothing.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+
+# install.sh rewrites User/Group to the installing account.
+# No root needed: Modbus is on 5020 and the preview on 8080, both unprivileged,
+# and the PLC connection is outbound. "video" group grants /dev/video0.
+User=chopcam
+Group=chopcam
+SupplementaryGroups=video
+
+WorkingDirectory=/opt/chopcam
+ExecStart=/opt/chopcam/venv/bin/python /opt/chopcam/src/capture.py
+Environment=CHOPCAM_CONF=/etc/chopcam.conf
+
+Restart=always
+RestartSec=10
+
+# capture.py spawns ffmpeg. Without control-group kill, a stopped service can
+# leave ffmpeg holding /dev/video0 and the next start fails with
+# "Device or resource busy".
+KillMode=control-group
+KillSignal=SIGINT
+TimeoutStopSec=20
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=chopcam
+
+# Ring buffer is ~400 MB at 1080p120 / 30 s. Clear of that, but low enough that
+# a runaway can't push a 4 GB Pi into swap.
+MemoryMax=1500M
+
+# Capture must not lose frames to CPU contention. postprocess is nice'd to 19
+# in the other direction.
+Nice=-5
+IOSchedulingClass=best-effort
+IOSchedulingPriority=2
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/var/lib/chopcam
+
+[Install]
+WantedBy=multi-user.target

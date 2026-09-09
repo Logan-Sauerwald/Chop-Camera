@@ -1,0 +1,31 @@
+[Unit]
+Description=chopcam - transcode to H.264, ship to aggregator, purge
+Documentation=file:/opt/chopcam/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+
+# install.sh rewrites User/Group to the installing account.
+User=chopcam
+Group=chopcam
+
+ExecStart=/opt/chopcam/src/postprocess.sh
+Environment=CHOPCAM_CONF=/etc/chopcam.conf
+
+# Stay out of the capture service's way. This is the whole point of splitting
+# transcode out of capture.py: libx264 runs ~6 fps on 1080p120 material, so a
+# 30 s clip is ~10 minutes of full-core work, and capture must never drop
+# frames because of it. Idle scheduling hands CPU and disk straight back.
+Nice=19
+CPUSchedulingPolicy=idle
+IOSchedulingClass=idle
+
+# Never hang forever on a wedged ffmpeg or a dead aggregator; the timer picks
+# the work up on the next pass.
+TimeoutStartSec=3600
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=chopcam-post

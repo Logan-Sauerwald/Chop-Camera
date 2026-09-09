@@ -1,0 +1,12 @@
+# Real config: contains the PLC address, tag names and aggregator credentials.
+# Commit chopcam.conf.example instead.
+chopcam.conf
+
+# Captured media -- never commit clips
+*.mkv
+*.mp4
+*.jpg
+
+venv/
+__pycache__/
+*.pyc

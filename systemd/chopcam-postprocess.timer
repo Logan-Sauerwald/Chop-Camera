@@ -1,0 +1,22 @@
+[Unit]
+Description=Run chopcam post-processing periodically
+Documentation=file:/opt/chopcam/README.md
+
+[Timer]
+# 2 min after boot: lets capture settle and the network come up first.
+OnBootSec=2min
+
+# Every 5 min. At one chop per hour most runs exit in under a second. The short
+# interval matters for recovery: if the aggregator was down, clips retry 12
+# times an hour instead of waiting for someone to notice.
+OnUnitActiveSec=5min
+
+# Stagger the five nodes so they don't transcode and upload in lockstep.
+RandomizedDelaySec=60
+
+# If the node was off when a run was due, run once on next boot. Safe because
+# postprocess.sh takes an flock.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

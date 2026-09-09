@@ -1,0 +1,142 @@
+# ---------------------------------------------------------------------------
+# chopcam node configuration
+#
+# Copy to /etc/chopcam.conf and edit. Read by BOTH src/capture.py and
+# src/postprocess.sh, so the format must stay valid bash:
+#   KEY="value"   -- no spaces around '=', always quote values.
+#
+# When adding nodes 2-5, THIS IS THE ONLY FILE THAT CHANGES.
+# ---------------------------------------------------------------------------
+
+# Identifies this node in clip filenames. Unique per Pi: chop1..chop5.
+NODE_NAME="chop1"
+
+# --- PLC trigger ------------------------------------------------------------
+PLC_TRIGGER="true"
+
+# Which PLC family this node talks to. Different lines use different PLCs, so
+# this is per-node.
+#   controllogix  Allen-Bradley ControlLogix / CompactLogix (EtherNet/IP)
+#   siemens       Siemens S7-300/400/1200/1500 (ISO-on-TCP, port 102)
+PLC_TYPE="controllogix"
+
+# PLC address.
+#   ControlLogix: plain IP if the Ethernet port is on the CPU itself. With a
+#                 SEPARATE 1756-EN2T module, append the CPU slot: "10.2.4.1/1".
+#                 If connect times out but ping works, the slot is why.
+#   Siemens:      plain IP. Rack/slot go in SIEMENS_RACK / SIEMENS_SLOT below.
+PLC_PATH="10.2.4.1"
+
+# The boolean to watch. Syntax depends on PLC_TYPE.
+#
+# ControlLogix -- a tag name. Rockwell output tags are often "...:O.Data.7"
+#   rather than "...:O.7", and may be an alias. Don't guess:
+#       capture.py --list-tags 156N0
+#   and paste the exact string it prints.
+#
+# Siemens -- an absolute address. Supported forms:
+#       DB100.DBX0.7   data block 100, byte 0, bit 7
+#       Q0.7  / A0.7   process output byte 0, bit 7  (EN / DE mnemonics)
+#       I3.2  / E3.2   process input
+#       M10.3          memory bit (merker / flag)
+#   Bit index must be 0-7.
+#
+# Each chop point has its OWN trigger. This is a per-node value.
+TRIGGER_TAG="_R1_156N0:33:O.7"
+
+# --- Siemens only -----------------------------------------------------------
+# Rack and slot of the CPU. Ignored when PLC_TYPE="controllogix".
+#   S7-1200 / S7-1500   rack 0, slot 1
+#   S7-300  / S7-400    rack 0, slot 2
+SIEMENS_RACK="0"
+SIEMENS_SLOT="1"
+
+# TWO THINGS MUST BE SET IN TIA PORTAL or reads fail even though the TCP
+# connection succeeds:
+#   1. CPU properties -> Protection & Security -> "Permit access with PUT/GET
+#      communication from remote partner" must be ENABLED.
+#   2. Any DB you read must have "Optimized block access" DISABLED (right-click
+#      the DB -> Properties). Optimized DBs have no absolute byte addresses.
+# Verify with:  capture.py --test-trigger
+
+# Tag reads per second. 30 Hz (~33 ms) catches any physical output energized
+# longer than a few tens of ms. If a chop is ever missed, raise this or ask
+# controls to latch the bit.
+POLL_HZ="30"
+
+# --- Modbus bench trigger ---------------------------------------------------
+# Lets you fire a recording by hand without the PLC. Keep "true" during
+# commissioning: it separates "PLC problem" from "camera problem" instantly.
+# Set "false" once the PLC trigger is confirmed in production.
+MODBUS_TEST_TRIGGER="true"
+MODBUS_BIND_IP="0.0.0.0"
+MODBUS_PORT="5020"
+MODBUS_TRIGGER_PDU="0"
+
+# --- camera -----------------------------------------------------------------
+# 1920x1080 @ 120 is a CROPPED sensor readout on this module -- narrower field
+# of view than the sensor can see, but the only way to get 120 fps. Full-sensor
+# modes (2592x1944, 3840x3040) are wider but cap at 20-30 fps. See
+# docs/hardware.md before changing.
+CAMERA_DEVICE="/dev/video0"
+FRAME_WIDTH="1920"
+FRAME_HEIGHT="1080"
+FPS="120"
+
+# --- live preview -----------------------------------------------------------
+LIVE_FEED="true"
+LIVE_HOST="0.0.0.0"
+LIVE_PORT="8080"
+# Preview refresh rate. Drop to 5-8 when the aggregator is showing five nodes
+# at once, so the display isn't decoding five full-rate streams.
+LIVE_FPS="15"
+
+# --- clip geometry ----------------------------------------------------------
+# Seconds kept before / after the trigger. 15+15 at 120 fps = ~3600 frames.
+PRE_SECONDS="15"
+POST_SECONDS="15"
+
+# --- storage ----------------------------------------------------------------
+STATE_DIR="/var/lib/chopcam"
+
+# "mjpeg" = stream-copy: clip written in ~0.1 s, near-zero CPU. USE THIS.
+# "h264"  = encode inline instead. Measured ~10 MINUTES per 30 s clip on a
+#           Pi 4 at full CPU, competing with the 120 fps capture thread.
+#           postprocess.sh does the H.264 conversion later instead.
+CAPTURE_ENCODE="mjpeg"
+
+# --- post-processing --------------------------------------------------------
+CRF="23"                 # H.264 quality; lower = bigger/better
+PRESET="veryfast"        # best speed/size tradeoff on a Pi 4 for this material
+
+# realtime -> true 120 fps preserved; scrub frame-by-frame to inspect
+# slowmo   -> retimed to 30 fps output, so it PLAYS at 4x slow motion in any
+#             player with no scrubbing. Every frame kept either way.
+PLAYBACK_MODE="realtime"
+
+# --- transfer to aggregator -------------------------------------------------
+# "false" = transcode only; clips stay in $STATE_DIR/encoded and you scp them
+#           off by hand. Nothing is ever auto-deleted in this mode.
+# "true"  = push to the aggregator automatically.
+SHIP_ENABLED="false"
+
+# Used only when SHIP_ENABLED="true". Forward slashes work for both a Windows
+# scp target and a Linux one.
+AGG_USER="lsauerwald"
+AGG_IP="10.2.4.50"
+AGG_DIR="C:/Users/lsauerwald/Downloads/Chop_vids"
+
+# How delivery is confirmed before the local copy is set aside:
+#   hash - SHA-256 compared on both ends (strongest)
+#   size - byte-size comparison; catches truncation, which is the realistic
+#          failure since SSH already guarantees integrity in transit
+#   none - trust scp's exit status (debugging only)
+VERIFY_MODE="hash"
+
+# Local copy kept this long AFTER confirmed delivery, so an aggregator rebuild
+# doesn't cost you recent footage.
+LOCAL_RETENTION_DAYS="3"
+
+# Purge oldest DELIVERED clips early if the filesystem passes this. Never
+# touches anything not yet shipped.
+DISK_PCT_LIMIT="85"
