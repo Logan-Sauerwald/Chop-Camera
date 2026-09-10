@@ -320,7 +320,15 @@ sudo systemctl enable --now chopcam-purge.timer
 
 Open `http://<aggregator>:8090/`. Adding a camera later is one entry in `NODES`
 and a restart — see [`wall-layouts.md`](docs/wall-layouts.md) for how the tiles
-arrange themselves.
+arrange themselves, and for the player and the chop log.
+
+Two things the installer sets up that are worth knowing about:
+
+- `INCOMING_DIR/keep/` — the player's **Keep this clip** moves a clip here and
+  the purge never touches it, however old it gets. That is how footage outlives
+  `RETENTION_DAYS` without changing the number.
+- `INCOMING_DIR/choplog.jsonl` — every trigger every node reports, whether a
+  clip came of it or not. Read it at `http://<aggregator>:8090/log`.
 
 ---
 
@@ -364,7 +372,8 @@ curl -s http://<aggregator>:8090/clips | python3 -m json.tool
 ## Viewing from a laptop
 
 Plug into the same switch and open `http://<aggregator>:8090/`. Same page, same
-buttons.
+buttons. `http://<aggregator>:8090/log` opens straight to the chop log and
+starts no live streams, which is the lighter way in over the plant switch.
 
 - The laptop needs to reach **the nodes as well as the aggregator** — the live
   tiles stream straight from each camera. Playback and downloads come from the
@@ -398,6 +407,10 @@ which the Pi 5 does not.
 | `/healthz` returns 503 | camera stalled, trigger disconnected, or the ring is memory-bound; the JSON says which |
 | `modbus trigger DISABLED` | port busy or pymodbus missing — capture keeps running regardless |
 | `hash MISMATCH` on shipping | the copy on the aggregator differs — truncated or corrupt |
+| Chop log says **missing** | a clip was recorded on the node and never arrived; check `journalctl -u chopcam-postprocess` there |
+| Chop log says **purged** | it passed `RETENTION_DAYS` and was deleted on schedule — not a fault. Use **Keep this clip** on anything worth holding |
+| Chop log is empty | nodes older than the log, or unreachable; `curl http://<node>:8080/triggers` should answer |
+| `WARNING: ... kept clip(s) ... never deleted` | kept clips now fill the disk; release some from the player, or move them off |
 | `... got no answer` on shipping | the verify command returned nothing; check the aggregator account can run `sha256sum` |
 | Clip re-ships every run | it never verified — see the two rows above |
 | Wall tile grey with no explanation | that node's `/healthz` is unreachable; check the node |

@@ -20,8 +20,17 @@ install has.
 ```
 chopcam-agg.conf.example   every tunable; the ONLY file that differs per install
 install-aggregator.sh      one-shot setup
-wall.py                    wall page, node status, clip listing
-systemd/                   service unit
+wall.py                    wall page, player, chop log, node status, clip listing
+purge.py                   retention; the only thing here that deletes footage
+systemd/                   service and timer units
+```
+
+On disk, under `INCOMING_DIR`:
+
+```
+incoming/                  clips as the nodes deliver them
+incoming/keep/             clips somebody kept; the purge never looks in here
+incoming/choplog.jsonl     every trigger any node has reported
 ```
 
 The capture-node half lives at the repo root (`src/`, `install.sh`,
@@ -87,13 +96,21 @@ account can run `sha256sum` on `INCOMING_DIR`), while a verify returning a
 
 | Path | What |
 |---|---|
-| `/` | the wall — live tiles, one per node, each with a **Last chop** button |
+| `/` | the wall — live tiles, one per node, each with **Last chop** and **Older** |
+| `/log` | the same page with the chop log open; bookmarkable, and it starts no live streams |
 | `/clip/<file>` | play a clip (Range-capable, so the player can seek) |
 | `/clip/<file>?slowmo=1` | download a 4× slow-motion copy |
 | `/clip/<file>?download=1` | download the original, true speed |
-| `/status` | JSON: every node's state, camera, PLC, last clip, pending chop |
-| `/clips` | JSON: newest clips delivered, newest first |
+| `POST /keep/<file>` | move a clip where the purge cannot delete it |
+| `POST /unkeep/<file>` | move it back |
+| `/status` | JSON: every node's state, camera, PLC, last clip, pending chop, clip shape |
+| `/clips` | JSON: newest clips delivered, newest first; `?node=<name>` for one camera |
+| `/choplog` | JSON: every trigger any node reported, with what became of it |
 | `/healthz` | this aggregator: 200 healthy, 503 if the clip directory is unwritable or no nodes are configured |
+
+Keep and release are `POST`, not `GET`: they move a file, and a `GET` that
+changes state would also fire for anything that prefetches links — which on a
+page left open on a wall monitor is not theoretical.
 
 Tiles are colour-coded and carry a badge:
 
@@ -109,14 +126,25 @@ still comes straight from the nodes.
 
 ## Watching a chop
 
-Each tile carries a button showing that camera's most recent clip and its age.
-Click it and the clip fills the screen, playing at **0.25×**.
+Each tile carries two buttons: **Last chop**, showing that camera's most recent
+clip and its age, and **Older**, which opens the same player with the camera's
+clip list beside it. Either fills the screen, playing at **0.25×**.
 
 - **Speed** — 0.1× / 0.25× / 0.5× / 1×
 - **Pause** — the button, or the spacebar
+- **Step** — `‹` / `›`, or `,` and `.`
+- **Jump to chop** — the button, or `c`
+- **Keep this clip** — the button, or `k`
 - **Back to live** — the button, or Esc
 - **Download slow motion** — a 4× slow copy that plays slowly in *any* player
 - **Original speed** — the true-speed file
+
+The bar under the video is the player's own rather than the browser's, so the
+**trigger instant can be marked on it** — the red `CHOP` line — and the readout
+is in seconds from the chop rather than from the start of the file. The mark
+sits at `duration − POST_SECONDS`, measured back from the end because the
+post-roll is always complete while the pre-roll can be short if the ring buffer
+had not filled; each node publishes its own `POST_SECONDS` at `/healthz`.
 
 Slow motion is not just convenience. On a 60 Hz monitor a 120 fps clip played
 at 1× can only show 60 of every 120 frames — half of what the camera captured
@@ -124,10 +152,17 @@ is dropped at the display. At 0.25× the clip presents 30 frames a second, so
 **every frame actually reaches your eye**. That is why the player opens at
 0.25× rather than 1×.
 
-Opening the player tears down the live MJPEG streams and restores them on
-exit. That is deliberate: each tile holds an open connection and keeps
-decoding, and leaving several running while the Pi 5 software-decodes a
-120 fps clip is what makes playback stutter.
+Opening the player — or the chop log — tears down the live MJPEG streams and
+restores them on exit. That is deliberate: each tile holds an open connection
+and keeps decoding, and leaving several running while the Pi 5 software-decodes
+a 120 fps clip is what makes playback stutter. Opening `/log` directly never
+starts them at all.
+
+### Older clips
+
+**Older** lists that camera's delivered clips newest first, each with its date
+and time, its age, its size, and a star if it is kept. Clicking one loads it
+without leaving the player. It is fed by `/clips?node=<name>`.
 
 ### The button's states
 
@@ -194,6 +229,69 @@ oldest clips go first regardless of age, so a retention window that turns out
 to be too long for the disk cannot fill it. Values below 50 are clamped up — a
 typo there would otherwise empty the archive on a healthy disk.
 
+### Keeping a clip
+
+Retention deletes everything past the window. Left at that, the first clip that
+genuinely matters is deleted a week later by a system working exactly as
+designed.
+
+**Keep this clip** in the player moves the file to `INCOMING_DIR/keep/`, which
+`purge.py` never touches — not on age, not under disk pressure. Nothing else
+about the clip changes: it plays, downloads and counts as that camera's last
+chop exactly as before, and the button releases it again. Two things enforce
+it: the purge's scan is not recursive, and it skips the directory by name as
+well.
+
+Every run reports what is protected:
+
+```
+[03:00:12] 4 clip(s) kept (612 MB) -- exempt from retention and from disk pressure
+```
+
+The one way this can bite is keeping so much that there is nothing left to
+free. The purge says so rather than failing quietly:
+
+```
+[03:00:12] WARNING: disk 86% full and no deletable clips left
+[03:00:12] WARNING: 91 kept clip(s) hold 13904 MB and are never deleted.
+           Release some from the wall, or move them off this disk.
+```
+
+## The chop log
+
+`http://<aggregator>:8090/log`, or **Chop log** in the header. Every trigger
+every camera has reported, whether a clip came of it or not.
+
+The aggregator can only see files, so a chop that produced nothing leaves no
+trace on disk anywhere — which is why the log is fed from each node's
+`/triggers` rather than from the directory. Nodes remember their own triggers,
+but only the last few hundred and only in RAM; draining them here makes the
+record survive a node reboot, a node replacement, an aggregator restart, and
+the footage itself.
+
+| Clip | Means |
+|---|---|
+| **on disk** | delivered, and here now |
+| **kept** | delivered, and exempt from the purge |
+| **in transit** | recorded on the node, still transcoding or on its way |
+| **recording** | fired just now; the post-roll is still being recorded |
+| **coalesced** | fired while the previous chop was still recording, so that clip covers it |
+| **failed** | the node could not record it — usually the camera had stopped |
+| **missing** | recorded on the node but never arrived; the pipeline is stuck |
+| **purged** | deleted on schedule after passing retention |
+
+The outcome is worked out on every read from what is actually on disk, never
+stored, so the log cannot go stale against the filesystem: a clip that was here
+yesterday and has since been purged reads as *purged* today without anything
+rewriting anything. **purged** and **missing** being different answers is what
+makes the log worth reading — one is the system working, the other is a fault.
+
+Settings: `CHOPLOG` (path, defaults to `choplog.jsonl` inside `INCOMING_DIR`),
+`CHOPLOG_MAX` (entries kept, default 5000, a couple of hundred bytes each) and
+`CHOPLOG_SYNC_SECONDS` (how often a node is re-read even when its trigger count
+has not moved, default 30 — a chop goes *recording* to *recorded* a post-roll
+later without the count changing).
+
 Sizing, at roughly 60 MB per clip:
 
 | Chops/hour | 4 nodes, 7 days | 8 nodes, 7 days |
@@ -222,9 +320,8 @@ struggle long before the network does.
 
 ## Not built yet
 
-- **Browsing older clips.** The wall plays the *latest* chop per camera.
-  `/clips` lists everything delivered, but there is no UI for picking an older
-  one — download it from that listing, or copy it off the disk.
-- **Authentication.** Anyone who can reach the aggregator can watch and
-  download. Fine on an isolated controls network; worth revisiting if that
-  changes.
+- **Authentication.** Anyone who can reach the aggregator can watch, download,
+  keep and release. Fine on an isolated controls network; worth revisiting if
+  that changes.
+- **Exporting kept clips.** They stay on the aggregator's disk. Getting a set
+  of them off it is still `scp`, or the download button one at a time.

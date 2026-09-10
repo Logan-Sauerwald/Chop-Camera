@@ -387,5 +387,100 @@ class TestHealth(unittest.TestCase):
         json.dumps(capture.health_snapshot())
 
 
+class TestTriggerLog(unittest.TestCase):
+    """What the node remembers about its own triggers.
+
+    The aggregator can only see files, so a chop that never produced one --
+    the camera was down, the buffer was empty, it landed inside the previous
+    recording -- would leave no trace anywhere. This is where that trace is
+    made, and /triggers is how it gets off the node.
+    """
+
+    def setUp(self):
+        from collections import deque
+        self._saved_log = list(capture._trigger_log)
+        self._saved_status = dict(capture._status)
+        with capture._status_lock:
+            capture._trigger_log.clear()
+        # Drain anything an earlier test left queued.
+        while not capture.trigger_q.empty():
+            capture.trigger_q.get_nowait()
+
+    def tearDown(self):
+        with capture._status_lock:
+            capture._trigger_log.clear()
+            capture._trigger_log.extend(self._saved_log)
+            capture._status.clear()
+            capture._status.update(self._saved_status)
+        while not capture.trigger_q.empty():
+            capture.trigger_q.get_nowait()
+
+    def test_a_trigger_is_recorded_the_moment_it_fires(self):
+        capture.fire_trigger("plc")
+        log = capture.trigger_log_snapshot()
+        self.assertEqual(len(log), 1)
+        self.assertEqual(log[0]["source"], "plc")
+        self.assertEqual(log[0]["state"], "recording")
+        self.assertIsNone(log[0]["clip"])
+        # Parseable, and the aggregator dedupes on it, so it must be present.
+        self.assertTrue(datetime.fromisoformat(log[0]["utc"]))
+
+    def test_the_record_rides_with_the_trigger(self):
+        # Matching on a timestamp would tie for two triggers in one second, so
+        # the writer is handed the object itself.
+        capture.fire_trigger("modbus")
+        _mono, _wall, source, record = capture.trigger_q.get_nowait()
+        self.assertEqual(source, "modbus")
+        self.assertIs(record, capture._trigger_log[-1])
+
+    def test_the_writer_can_fill_in_the_clip(self):
+        capture.fire_trigger("plc")
+        _mono, _wall, _src, record = capture.trigger_q.get_nowait()
+        capture.set_trigger_state(record, clip="event_x.mp4", state="recorded")
+        entry = capture.trigger_log_snapshot()[0]
+        self.assertEqual(entry["clip"], "event_x.mp4")
+        self.assertEqual(entry["state"], "recorded")
+
+    def test_the_snapshot_is_a_copy(self):
+        # It is serialised straight to JSON on a request thread while the
+        # writer thread is still mutating records.
+        capture.fire_trigger("plc")
+        snap = capture.trigger_log_snapshot()
+        snap[0]["state"] = "tampered"
+        self.assertEqual(capture.trigger_log_snapshot()[0]["state"], "recording")
+
+    def test_the_log_is_bounded(self):
+        from collections import deque
+        saved = capture._trigger_log
+        capture._trigger_log = deque(maxlen=5)
+        try:
+            for _ in range(20):
+                capture.fire_trigger("plc")
+            self.assertEqual(len(capture.trigger_log_snapshot()), 5)
+        finally:
+            capture._trigger_log = saved
+
+    def test_set_trigger_state_tolerates_no_record(self):
+        capture.set_trigger_state(None, state="recorded")     # must not raise
+
+    def test_the_trigger_count_still_moves(self):
+        before = capture._status["trigger_count"]
+        capture.fire_trigger("plc")
+        self.assertEqual(capture._status["trigger_count"], before + 1)
+        self.assertEqual(capture._status["trigger_last_source"], "plc")
+
+    def test_health_reports_the_log_and_the_clip_shape(self):
+        capture.fire_trigger("plc")
+        health = capture.health_snapshot()
+        self.assertEqual(health["triggers"]["logged"], 1)
+        # The aggregator's player puts the trigger marker at post_seconds back
+        # from the end of the clip, so the node has to say what that is.
+        self.assertEqual(health["clip_shape"]["post_seconds"],
+                         capture.POST_SECONDS)
+        self.assertEqual(health["clip_shape"]["pre_seconds"],
+                         capture.PRE_SECONDS)
+        json.dumps(health)                       # served as-is at /healthz
+
+
 if __name__ == "__main__":
     unittest.main()

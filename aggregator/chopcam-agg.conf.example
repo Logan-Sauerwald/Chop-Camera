@@ -39,7 +39,8 @@ WALL_HOST="0.0.0.0"
 # and the account the nodes ssh in as must be able to write here.
 INCOMING_DIR="/srv/chopcam/incoming"
 
-# Newest N clips listed at /clips.
+# Newest N clips listed at /clips when nothing asks for more. The player's
+# per-camera clip list asks for more explicitly, so this is only a default.
 CLIP_LIST_LIMIT="50"
 
 # --- retention --------------------------------------------------------------
@@ -54,12 +55,21 @@ CLIP_LIST_LIMIT="50"
 # Age is taken from the timestamp in each clip's filename, not the file's
 # mtime, so a node delivering a backlog after being offline does not reset the
 # clock on old footage.
+#
+# "Keep this clip" in the player moves a clip to INCOMING_DIR/keep/, which the
+# purge never touches -- not on age, and not when the disk fills. That is the
+# way to hold on to a clip that matters for longer than this window, and it
+# needs no config change at all.
 RETENTION_DAYS="7"
 
 # Emergency guard. If the filesystem reaches this percentage, oldest clips are
 # deleted first regardless of age, so a retention window that turns out to be
 # too long for the disk cannot fill it. Values below 50 are clamped up: a typo
 # here would otherwise empty the archive on a healthy disk.
+#
+# Kept clips are exempt from this too. If enough of them accumulate that there
+# is nothing left to free, the purge says so in its log -- check it with
+# "journalctl -u chopcam-purge" if the disk is filling.
 DISK_PCT_LIMIT="85"
 
 # --- playback ---------------------------------------------------------------
@@ -74,3 +84,22 @@ SLOWMO_FACTOR="4"
 # is what surfaces a genuinely stuck pipeline instead of footage quietly never
 # appearing.
 STUCK_MINUTES="30"
+
+# --- chop log ---------------------------------------------------------------
+# Every trigger every node reports is recorded here, whether a clip came of it
+# or not, and it outlives both the nodes' own memory and the footage itself.
+# Read it at http://<aggregator>:8090/log .
+#
+# Defaults to choplog.jsonl inside INCOMING_DIR, which is already writable by
+# the wall service; set this only to put it somewhere else (and then add that
+# directory to ReadWritePaths in chopcam-wall.service).
+#CHOPLOG="/srv/chopcam/incoming/choplog.jsonl"
+
+# How many chops to keep in the log. Each is a couple of hundred bytes, so the
+# default is well under a megabyte. The oldest are dropped past this.
+CHOPLOG_MAX="5000"
+
+# How often to re-read a node's trigger list even when its trigger count has
+# not moved, in seconds. A chop goes "recording" to "recorded" a post-roll
+# after it fires without the count changing, and this is what notices.
+CHOPLOG_SYNC_SECONDS="30"

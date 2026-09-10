@@ -246,6 +246,12 @@ CLIP_TIMESTAMP="utc"
 # (buffer.memory_evictions).
 #BUFFER_MAX_MB="620"
 
+# How many recent triggers this node remembers and serves at /triggers, for the
+# aggregator's chop log. The aggregator keeps the long history; this only has to
+# cover the gap between its polls, so the default is generous already. It lives
+# in RAM, at a couple of hundred bytes each.
+#TRIGGER_LOG_MAX="200"
+
 # --- storage ----------------------------------------------------------------
 STATE_DIR="/var/lib/chopcam"
 

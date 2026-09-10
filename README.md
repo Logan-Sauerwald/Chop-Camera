@@ -25,7 +25,11 @@ H.264 and collected on an aggregator for review in slow motion.
 | Transfer to aggregator (Linux) | **tested end to end, not on real hardware** |
 | Aggregator — live wall + node status | **built, not run on real hardware** |
 | Aggregator — last-chop playback + slow motion | **built, not run on real hardware** |
+| Aggregator — trigger marked on the player timeline | **built, not run on real hardware** |
+| Aggregator — browsing older clips per camera | **built, not run on real hardware** |
 | Aggregator — clip retention (auto-delete) | **built, not run on real hardware** |
+| Aggregator — "keep this clip", exempt from the purge | **built, not run on real hardware** |
+| Aggregator — chop log (every trigger, delivered or not) | **built, not run on real hardware** |
 | Node pipeline on real hardware | **verified — 3600 frames at 120.00 fps, zero lost** |
 | Nodes 2–5 | **not purchased** |
 
@@ -40,6 +44,8 @@ was tried and rejected, and why the design looks the way it does.
   camera ──USB──> Pi 4 (node)  ──Ethernet──┼──> switch ──> Pi 5 aggregator
   camera ──USB──> Pi 4 (node)  ──Ethernet──┤                 - holds clips
   camera ──USB──> Pi 4 (node)  ──Ethernet──┘                 - preview wall
+                                                             - slow-mo player
+                                                             - chop log
                        ▲
                        └── polls its own boolean on the PLC.
                            ControlLogix (EtherNet/IP) or Siemens S7
@@ -78,7 +84,7 @@ drift apart on how a value is spelled or how a clip is named.
 | Code | `src/` | `aggregator/` |
 | Setup | `sudo ./install.sh` | `sudo aggregator/install-aggregator.sh` |
 | Config | `/etc/chopcam.conf` | `/etc/chopcam-agg.conf` |
-| Does | buffers, triggers, records, transcodes, ships | receives clips, drives the wall, plays back chops, deletes old footage |
+| Does | buffers, triggers, records, transcodes, ships | receives clips, drives the wall, plays back chops, logs every trigger, deletes old footage |
 
 An install is one aggregator plus however many nodes that machine needs.
 Adding a camera is a new node config plus one entry in the aggregator's
@@ -93,11 +99,11 @@ src/capture.py         capture service (buffer, triggers, preview, clip writer)
 src/plc.py             PLC drivers: ControlLogix + Siemens behind one interface
 src/postprocess.sh     transcode, ship, purge
 systemd/               service + timer units
-aggregator/            the aggregator half — wall, node status, clip landing
+aggregator/            the aggregator half — wall, player, chop log, retention
 tests/                 unit tests — run with no PLC and no camera attached
 docs/hardware.md       parts, measurements, camera modes, exposure tuning
 docs/deployments.md    per-machine node tables — what each node talks to
-docs/wall-layouts.md   how the wall arranges 1..16 cameras, with screenshots
+docs/wall-layouts.md   the wall, the player and the chop log, with screenshots
 HANDOFF.md             design reasoning and open items — read this
 INSTALL.md             step-by-step deployment
 ```
