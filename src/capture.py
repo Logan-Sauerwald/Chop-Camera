@@ -906,11 +906,17 @@ def _live_page():
     return ("""<!doctype html>
 <html><head><meta charset="utf-8"><title>chopcam - %(node)s</title>
 <style>
-  html,body{margin:0;background:#111;height:100%%;display:flex;
-            align-items:center;justify-content:center;}
+  html,body{margin:0;background:#111;height:100%%;overflow:hidden;}
+  body{display:flex;align-items:center;justify-content:center;}
   .wrap{position:relative;display:inline-block;line-height:0;}
-  img{display:block;max-width:100vw;max-height:100vh;}
-  .grid{position:absolute;inset:0;pointer-events:none;}
+  /* dvh so a phone's URL bar doesn't make 100vh taller than the screen. */
+  img{display:block;max-width:100vw;max-height:100vh;max-height:100dvh;}
+  /* width/height are load-bearing. inset:0 alone does NOT stretch an SVG that
+     has a viewBox: it is a replaced element with an intrinsic 1:1 ratio, so a
+     definite width gives it a SQUARE height. The overlay then hung far below
+     the picture -- grid lines over black, and enough overflow to make the
+     page scroll. */
+  .grid{position:absolute;inset:0;width:100%%;height:100%%;pointer-events:none;}
   .tag{position:absolute;top:8px;left:10px;font:600 14px system-ui,sans-serif;
        color:#fff;text-shadow:0 1px 3px #000;letter-spacing:.04em;}
 </style></head>
