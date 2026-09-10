@@ -7,6 +7,11 @@ chopcam.conf
 *.mp4
 *.jpg
 
+# ...except documentation screenshots, which belong in the repo. Without this
+# the *.jpg rule swallows them and `git add` says nothing, so the docs end up
+# referencing images that were never committed.
+!docs/images/*.jpg
+
 venv/
 __pycache__/
 *.pyc

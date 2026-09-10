@@ -399,8 +399,8 @@ restamped to 30 fps with every frame intact. Measured: 600 frames in, 600
 frames out, 5.00 s becomes 19.98 s, **0.08 s to produce**, same file size.
 
 This matters because the Pi 5 has no H.264 *encoder* either -- re-encoding on
-demand would be hopeless, but a container rewrite is free. It also replaced `PLAYBACK_MODE="slowmo"`, which used to bake the decision into
-the archive at encode time. Clips are now always stored at true speed, and slow
+demand would be hopeless, but a container rewrite is free. It also replaced the old `PLAYBACK_MODE` slow-motion setting, which used to bake
+the decision into the archive at encode time. Clips are now always stored at true speed, and slow
 motion is chosen on the way out — reversible, and the archive stays honest.
 
 ### Range requests are what make the player work
