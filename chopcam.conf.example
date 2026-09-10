@@ -4,12 +4,48 @@
 # Copy to /etc/chopcam.conf and edit. Read by BOTH src/capture.py and
 # src/postprocess.sh, so the format must stay valid bash:
 #   KEY="value"   -- no spaces around '=', always quote values.
+# Trailing comments after a value are fine (both readers strip them).
 #
 # When adding nodes 2-5, THIS IS THE ONLY FILE THAT CHANGES.
+# After editing, check it before starting the service:
+#   /opt/chopcam/venv/bin/python /opt/chopcam/src/capture.py --check-config
 # ---------------------------------------------------------------------------
 
-# Identifies this node in clip filenames. Unique per Pi: chop1..chop5.
-NODE_NAME="chop1"
+# Install identity -- the machine/line this aggregator+cameras set serves,
+# e.g. "line3", "sl3", "winder". EVERY PI AT ONE INSTALL SHARES THIS; only the
+# per-node values below differ. That is what makes a per-install conf template
+# work: copy it to each Pi and change NODE_NAME, PLC_PATH, TRIGGER_TAG and
+# NODE_IP, nothing else.
+#
+# Clips are labelled "<SITE>-<NODE_NAME>", so setting it makes names unique
+# plant-wide and stops "chop1" meaning five different cameras. Leave blank and
+# clips are labelled by NODE_NAME alone.
+SITE=""
+
+# REQUIRED. Identifies this node in every clip filename and in the clip's
+# embedded metadata. Examples: "chop1", "uw3".
+#
+# It must be unique across everything that shares an aggregator. Several
+# camera+aggregator setups run around the plant, so if their footage might ever
+# be pooled, include the machine: "sl3-uw1" rather than "uw1".
+#
+# Deliberately blank here -- the service refuses to start until it is set,
+# because a node running under a name copied from another Pi produces footage
+# nobody can trace back to a chop point, and there is no way to tell after the
+# fact.
+NODE_NAME=""
+
+# --- this node's own network ------------------------------------------------
+# Applied by install.sh via NetworkManager. Leave NODE_IP blank to manage
+# networking yourself and install.sh will not touch it.
+#
+# Every install is on its own subnet -- one machine may be 10.2.4.x while
+# another is 192.168.0.x -- so these are per-node values like the PLC address.
+# The wired port carries the controls network; ipv4.never-default keeps Wi-Fi
+# as the default route so SSH and internet still work.
+NODE_IP=""              # e.g. "192.168.0.101"
+NODE_CIDR="24"
+NODE_INTERFACE=""       # blank = autodetect the wired connection
 
 # --- PLC trigger ------------------------------------------------------------
 PLC_TRIGGER="true"
@@ -18,31 +54,64 @@ PLC_TRIGGER="true"
 # this is per-node.
 #   controllogix  Allen-Bradley ControlLogix / CompactLogix (EtherNet/IP)
 #   siemens       Siemens S7-300/400/1200/1500 (ISO-on-TCP, port 102)
+# Aliases are accepted (ab, rockwell, logix, s7, simatic, tia, ...).
 PLC_TYPE="controllogix"
 
-# PLC address.
+# REQUIRED when PLC_TRIGGER="true". Address of the PLC this chop point's
+# trigger lives on.
+#
+# THIS IS PER NODE, NOT PER SITE. Different machines around the plant sit on
+# different subnets, and on some machines every chop point has its OWN PLC at
+# its own address. Never assume a value from another node's config applies
+# here -- confirm it with --test-trigger before starting the service.
+#
 #   ControlLogix: plain IP if the Ethernet port is on the CPU itself. With a
-#                 SEPARATE 1756-EN2T module, append the CPU slot: "10.2.4.1/1".
-#                 If connect times out but ping works, the slot is why.
+#                 SEPARATE 1756-EN2T module, append the CPU slot, e.g.
+#                 "<ip>/1". If connect times out but ping works, the slot is
+#                 why.
 #   Siemens:      plain IP. Rack/slot go in SIEMENS_RACK / SIEMENS_SLOT below.
-PLC_PATH="10.2.4.1"
+PLC_PATH=""
 
-# The boolean to watch. Syntax depends on PLC_TYPE.
+# REQUIRED when PLC_TRIGGER="true". The boolean to watch; syntax depends on
+# PLC_TYPE.
 #
 # ControlLogix -- a tag name. Rockwell output tags are often "...:O.Data.7"
 #   rather than "...:O.7", and may be an alias. Don't guess:
 #       capture.py --list-tags 156N0
-#   and paste the exact string it prints.
+#   and paste the exact string it prints. Point at a single BIT: if the tag
+#   resolves to a DINT the trigger becomes "any nonzero value" and capture.py
+#   logs a warning saying so.
 #
 # Siemens -- an absolute address. Supported forms:
 #       DB100.DBX0.7   data block 100, byte 0, bit 7
+#       DB100.DBB0.7   same thing
+#       DB100.0.7      same thing (short form)
 #       Q0.7  / A0.7   process output byte 0, bit 7  (EN / DE mnemonics)
 #       I3.2  / E3.2   process input
 #       M10.3          memory bit (merker / flag)
-#   Bit index must be 0-7.
+#   Bit index must be 0-7. A bad address is a startup error, not a runtime one.
 #
 # Each chop point has its OWN trigger. This is a per-node value.
-TRIGGER_TAG="_R1_156N0:33:O.7"
+TRIGGER_TAG=""
+
+# --- worked examples --------------------------------------------------------
+# Real deployments, for reference. See docs/deployments.md for the full
+# per-machine tables. Copy the SHAPE, never the values.
+#
+# Allen-Bradley line -- one PLC, an output bit per chop point:
+#     PLC_TYPE="controllogix"
+#     PLC_PATH="10.2.4.1"                 # or "10.2.4.1/1" for a chassis slot
+#     TRIGGER_TAG="_R1_156N0:33:O.7"      # confirm with --list-tags
+#
+# Siemens unwinder line -- a SEPARATE PLC per station, a merker bit each:
+#     node uw1:  PLC_PATH="192.168.0.4"   TRIGGER_TAG="M158.7"
+#     node uw2:  PLC_PATH="192.168.0.8"   TRIGGER_TAG="M143.5"
+#     node uw3:  PLC_PATH="192.168.0.13"  TRIGGER_TAG="M155.6"
+#     node uw4:  PLC_PATH="192.168.0.14"  TRIGGER_TAG="M148.7"
+#     PLC_TYPE="siemens"                  # plus SIEMENS_RACK / SIEMENS_SLOT
+#
+# On that Siemens line BOTH values change per node -- there is no shared PLC
+# address to inherit, which is why neither ships with a default.
 
 # --- Siemens only -----------------------------------------------------------
 # Rack and slot of the CPU. Ignored when PLC_TYPE="controllogix".
@@ -50,6 +119,10 @@ TRIGGER_TAG="_R1_156N0:33:O.7"
 #   S7-300  / S7-400    rack 0, slot 2
 SIEMENS_RACK="0"
 SIEMENS_SLOT="1"
+
+# ISO-on-TCP port. Effectively always 102; only change it for a gateway that
+# remaps the port.
+#SIEMENS_PORT="102"
 
 # TWO THINGS MUST BE SET IN TIA PORTAL or reads fail even though the TCP
 # connection succeeds:
@@ -60,8 +133,13 @@ SIEMENS_SLOT="1"
 # Verify with:  capture.py --test-trigger
 
 # Tag reads per second. 30 Hz (~33 ms) catches any physical output energized
-# longer than a few tens of ms. If a chop is ever missed, raise this or ask
-# controls to latch the bit.
+# longer than a few tens of ms.
+#
+# This is a REQUEST, not a guarantee -- the real ceiling is how fast the PLC
+# answers. capture.py --test-trigger reports the rate it actually achieved and
+# the width of the pulses it saw, and the service logs a warning if it cannot
+# keep up. If a chop is ever missed, raise this or ask controls to latch the
+# bit.
 POLL_HZ="30"
 
 # --- Modbus bench trigger ---------------------------------------------------
@@ -69,21 +147,69 @@ POLL_HZ="30"
 # commissioning: it separates "PLC problem" from "camera problem" instantly.
 # Set "false" once the PLC trigger is confirmed in production.
 MODBUS_TEST_TRIGGER="true"
-MODBUS_BIND_IP="0.0.0.0"
+
+# Loopback by default, so only someone already on this Pi can fire a
+# recording. Set "0.0.0.0" if you need to trigger from a laptop during
+# commissioning -- that lets anyone on the plant network start a recording.
+MODBUS_BIND_IP="127.0.0.1"
 MODBUS_PORT="5020"
+
+# Which coil the trigger watches, as a PDU address. The Modbus PDU is ALWAYS
+# 0-based on the wire; the "00001" style in PLC documentation is a 1-based
+# display convention that maps to PDU 0. So a PLC configured to write "coil
+# 00001" arrives here as MODBUS_TRIGGER_PDU="0". If in doubt, watch the
+# journal: every coil write is logged with the PDU address it arrived on.
 MODBUS_TRIGGER_PDU="0"
+
 
 # --- camera -----------------------------------------------------------------
 # 1920x1080 @ 120 is a CROPPED sensor readout on this module -- narrower field
 # of view than the sensor can see, but the only way to get 120 fps. Full-sensor
 # modes (2592x1944, 3840x3040) are wider but cap at 20-30 fps. See
 # docs/hardware.md before changing.
+#
+# FPS is the rate REQUESTED from the camera, nothing more. The ring buffer is
+# bounded by time and by bytes, so getting this wrong no longer shortens the
+# pre-roll -- but the camera must actually support the mode, or capture will
+# not start. Check with:
+#   v4l2-ctl -d /dev/video0 --list-formats-ext | grep -A4 MJPG
 CAMERA_DEVICE="/dev/video0"
 FRAME_WIDTH="1920"
 FRAME_HEIGHT="1080"
 FPS="120"
 
+# v4l2 controls pinned before ffmpeg opens the camera, as name=value pairs.
+# Re-applied on every capture restart, since UVC controls do not reliably
+# survive the device being reopened. Blank leaves the camera on its defaults.
+#
+# THIS IS A PER-INSTALL SETTING because it depends on lighting at that camera.
+# It also decides whether you really get 120 fps: the module ships with
+# auto-exposure on and a default exposure of 15.6 ms, but 120 fps allows only
+# 8.33 ms per frame. Exposure cannot exceed the frame period, so in anything
+# less than bright light the camera quietly drops to ~64 fps -- and the frames
+# it does deliver smear 15 ms of blade travel, which is exactly the detail the
+# system exists to capture. Pin exposure short and add light.
+#
+# A sensible starting point for a lit chop point (60 Hz mains):
+#   CAMERA_CONTROLS="auto_exposure=1,exposure_time_absolute=40,focus_automatic_continuous=0,white_balance_automatic=0,backlight_compensation=0,power_line_frequency=2"
+#
+#   auto_exposure=1                 manual (3 = auto; must come first, the
+#                                   exposure control is inactive until then)
+#   exposure_time_absolute=40       units are 100 us, so 40 = 4 ms. Must be
+#                                   below 83 (8.3 ms) to sustain 120 fps;
+#                                   lower is sharper but darker.
+#   focus_automatic_continuous=0    stop autofocus hunting mid-chop
+#   white_balance_automatic=0       keep colour consistent across nodes
+#   backlight_compensation=0        it works by lengthening exposure
+#   power_line_frequency=2          2 = 60 Hz (1 = 50 Hz, 0 = disabled).
+#                                   Set 0 if anti-flicker limits exposure.
+#
+# List what this camera supports:  v4l2-ctl -d /dev/video0 --list-ctrls
+CAMERA_CONTROLS=""
+
 # --- live preview -----------------------------------------------------------
+# Serves the preview page at /, the MJPEG stream at /stream, and node health as
+# JSON at /healthz (HTTP 200 healthy, 503 degraded).
 LIVE_FEED="true"
 LIVE_HOST="0.0.0.0"
 LIVE_PORT="8080"
@@ -96,23 +222,51 @@ LIVE_FPS="15"
 PRE_SECONDS="15"
 POST_SECONDS="15"
 
+# Timestamp used in clip filenames.
+#   utc   -> event_20260909_193012Z_chop1.mkv
+#            Unambiguous and directly comparable across nodes, which is what
+#            lets you line up five cameras on the same chop.
+#   local -> event_20260909_143012-0500_chop1.mkv
+#            Wall-clock, with the UTC offset kept so the autumn DST hour is
+#            still unambiguous.
+# Either way the clip carries node, trigger source and tag in its metadata.
+CLIP_TIMESTAMP="utc"
+
+# Hard memory ceiling for the in-RAM ring buffer, in MB. The buffer normally
+# trims on TIME (PRE + POST + 1 s), and this only binds if the stream is fatter
+# than budgeted -- so leaving it unset is right for almost everyone.
+#
+# Default: 20 MB/s x the window, i.e. 620 MB at 15+15 s. That is comfortably
+# above the 118 Mbps (14.75 MB/s) peak measured on this camera, which fills
+# ~436 MB of a 31 s window.
+#
+# If you raise it, raise MemoryMax= in chopcam.service to match -- the service
+# warns at startup when the two disagree. If the ceiling ever starts evicting
+# frames the pre-roll goes short, and /healthz reports it rather than hiding it
+# (buffer.memory_evictions).
+#BUFFER_MAX_MB="620"
+
 # --- storage ----------------------------------------------------------------
 STATE_DIR="/var/lib/chopcam"
 
-# "mjpeg" = stream-copy: clip written in ~0.1 s, near-zero CPU. USE THIS.
-# "h264"  = encode inline instead. Measured ~10 MINUTES per 30 s clip on a
-#           Pi 4 at full CPU, competing with the 120 fps capture thread.
-#           postprocess.sh does the H.264 conversion later instead.
-CAPTURE_ENCODE="mjpeg"
-
 # --- post-processing --------------------------------------------------------
 CRF="23"                 # H.264 quality; lower = bigger/better
-PRESET="veryfast"        # best speed/size tradeoff on a Pi 4 for this material
 
-# realtime -> true 120 fps preserved; scrub frame-by-frame to inspect
-# slowmo   -> retimed to 30 fps output, so it PLAYS at 4x slow motion in any
-#             player with no scrubbing. Every frame kept either way.
-PLAYBACK_MODE="realtime"
+# Transcode speed. This is the floor on how soon a chop is viewable: libx264
+# runs ~6 fps on 1080p120 material, so a 30 s clip is minutes of Pi 4 CPU even
+# at idle priority. "ultrafast" roughly halves that for ~15% more size, which
+# is the right trade when someone is waiting to look at the clip.
+PRESET="ultrafast"
+
+# Keyframe interval, in frames. Short keyframes make seeking responsive in the
+# aggregator's player -- stepping back only decodes from the nearest keyframe
+# rather than up to two seconds of frames. 30 is a quarter second at 120 fps.
+GOP="30"
+
+# Clips are always written at TRUE SPEED, with every frame. Slow motion is a
+# viewing choice, not an encoding one: the aggregator plays them at 0.25x and
+# its download button hands you a 4x slow copy made by remuxing (no re-encode,
+# every frame kept), so the archive stays true-speed and reversible.
 
 # --- transfer to aggregator -------------------------------------------------
 # "false" = transcode only; clips stay in $STATE_DIR/encoded and you scp them
@@ -120,17 +274,22 @@ PLAYBACK_MODE="realtime"
 # "true"  = push to the aggregator automatically.
 SHIP_ENABLED="false"
 
-# Used only when SHIP_ENABLED="true". Forward slashes work for both a Windows
-# scp target and a Linux one.
-AGG_USER="lsauerwald"
-AGG_IP="10.2.4.50"
-AGG_DIR="C:/Users/lsauerwald/Downloads/Chop_vids"
+# REQUIRED when SHIP_ENABLED="true"; ignored otherwise. Each install has its
+# own aggregator on its own subnet, so these are per-setup, not plant-wide.
+#   AGG_USER="chopcam"
+#   AGG_IP="192.168.0.200"
+#   AGG_DIR="/srv/chopcam/incoming"
+AGG_USER=""
+AGG_IP=""
+AGG_DIR=""
+
+# SSH port on the aggregator. 22 unless the plant uses something else.
+AGG_PORT="22"
 
 # How delivery is confirmed before the local copy is set aside:
 #   hash - SHA-256 compared on both ends (strongest)
 #   size - byte-size comparison; catches truncation, which is the realistic
 #          failure since SSH already guarantees integrity in transit
-#   none - trust scp's exit status (debugging only)
 VERIFY_MODE="hash"
 
 # Local copy kept this long AFTER confirmed delivery, so an aggregator rebuild

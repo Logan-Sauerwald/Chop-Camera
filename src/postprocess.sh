@@ -43,11 +43,15 @@ SHIP_ENABLED="${SHIP_ENABLED:-false}"
 AGG_HOST="${AGG_USER:-user}@${AGG_IP:-127.0.0.1}"
 AGG_DIR="${AGG_DIR:-/tmp}"
 VERIFY_MODE="${VERIFY_MODE:-hash}"
+AGG_PORT="${AGG_PORT:-22}"
 LOCAL_RETENTION_DAYS="${LOCAL_RETENTION_DAYS:-3}"
 DISK_PCT_LIMIT="${DISK_PCT_LIMIT:-85}"
 CRF="${CRF:-23}"
-PRESET="${PRESET:-veryfast}"
-PLAYBACK_MODE="${PLAYBACK_MODE:-realtime}"
+PRESET="${PRESET:-ultrafast}"
+# Keyframe interval. Short keyframes make seeking in the player responsive:
+# a step backwards only has to decode from the nearest keyframe, not up to two
+# seconds of frames. Costs ~10-15% file size.
+GOP="${GOP:-30}"
 
 # ---------------------------------------------------------------------------
 
@@ -62,7 +66,10 @@ if ! flock -n 9; then
     exit 0
 fi
 
-SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new)
+# ssh takes -p for the port, scp takes -P, so they need separate arrays.
+_SSH_COMMON=(-o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new)
+SSH_OPTS=("${_SSH_COMMON[@]}" -p "$AGG_PORT")
+SCP_OPTS=("${_SSH_COMMON[@]}" -P "$AGG_PORT")
 
 # Count video packets: more reliable than nb_frames, which MJPEG often omits.
 frame_count() {
@@ -72,10 +79,24 @@ frame_count() {
 }
 
 # ---------------------------------------------------------------------------
+# STAGE 0 -- clear crash debris
+# ---------------------------------------------------------------------------
+# capture.py writes each clip to ".<name>.part.mkv" and renames it into place,
+# and stage 1 below does the same with ".<name>.part.mp4". A crash or a kill
+# mid-write leaves the dot-prefixed file behind. Nothing ever legitimately
+# takes an hour to write (a clip mux is ~0.1 s), so anything older than that is
+# debris. This is crash hygiene, not retention -- no completed clip is touched.
+stale="$(find "$RAW_DIR" "$ENC_DIR" -maxdepth 1 -name '.*.part.*' -type f \
+         -mmin +60 -print -delete 2>/dev/null | wc -l)"
+[[ "$stale" -gt 0 ]] && log "cleared $stale abandoned .part file(s)"
+
+# ---------------------------------------------------------------------------
 # STAGE 1 -- transcode MJPEG -> H.264 (on this Pi)
 # ---------------------------------------------------------------------------
 shopt -s nullglob
 
+# NOTE: this glob does not match dotfiles, which is exactly what keeps a clip
+# capture.py is still writing (".<name>.part.mkv") out of the loop.
 for raw in "$RAW_DIR"/*.mkv; do
     base="$(basename "$raw" .mkv)"
     out="$ENC_DIR/${base}.mp4"
@@ -83,7 +104,8 @@ for raw in "$RAW_DIR"/*.mkv; do
 
     [[ -e "$out" ]] && { log "already encoded, skipping: $base"; continue; }
 
-    # Skip anything capture.py may still be writing.
+    # Belt and braces behind the .part naming above: skip anything touched in
+    # the last 30 s, in case a clip arrived here by some other route.
     if [[ -n "$(find "$raw" -mmin -0.5 2>/dev/null)" ]]; then
         log "still being written, will retry: $base"
         continue
@@ -92,18 +114,10 @@ for raw in "$RAW_DIR"/*.mkv; do
     src_frames="$(frame_count "$raw")"
     log "transcoding $base (${src_frames:-?} frames)"
 
-    if [[ "$PLAYBACK_MODE" == "slowmo" ]]; then
-        # Keep every frame but stamp them at 30 fps, so the clip plays back at
-        # 1/4 speed in any player without the viewer doing anything.
-        timing=(-vf "setpts=4.0*PTS" -r 30)
-    else
-        timing=()
-    fi
-
     rm -f "$tmp"
     if ! ffmpeg -nostdin -hide_banner -loglevel error -y \
-            -i "$raw" "${timing[@]}" \
-            -c:v libx264 -preset "$PRESET" -crf "$CRF" \
+            -i "$raw" \
+            -c:v libx264 -preset "$PRESET" -crf "$CRF" -g "$GOP" \
             -pix_fmt yuv420p -movflags +faststart \
             "$tmp"; then
         log "ERROR: ffmpeg failed on $base -- keeping raw for retry"
@@ -129,34 +143,42 @@ done
 # STAGE 2 -- ship to aggregator, verify, retain locally
 # ---------------------------------------------------------------------------
 
-# Remote helpers assume a WINDOWS aggregator (PowerShell). For a Linux
-# aggregator swap these for sha256sum / stat -c%s.
+# Remote helpers. The aggregator is a Pi 5 running Pi OS.
+#
+# Verification is what makes deleting the local copy safe, so it has to be able
+# to read the file back. If these ever return nothing the clip is never marked
+# delivered and the same clip re-ships every run -- the log says so below.
+
+# Single-quote a string for safe interpolation into a remote shell command.
+shq() { printf "'%s'" "${1//\'/\'\\\'\'}"; }
+
 remote_hash() {
-    ssh "${SSH_OPTS[@]}" "$AGG_HOST" \
-        "powershell -NoProfile -Command \"(Get-FileHash -Algorithm SHA256 -LiteralPath '$1').Hash\"" \
-        2>/dev/null | tr -d '\r\n' | tr '[:upper:]' '[:lower:]'
+    ssh "${SSH_OPTS[@]}" "$AGG_HOST" "sha256sum -- $(shq "$1")" 2>/dev/null \
+        | cut -d' ' -f1 | tr -d '\r\n' | tr '[:upper:]' '[:lower:]'
 }
 
 remote_size() {
-    ssh "${SSH_OPTS[@]}" "$AGG_HOST" \
-        "powershell -NoProfile -Command \"(Get-Item -LiteralPath '$1').Length\"" \
-        2>/dev/null | tr -dc '0-9'
+    ssh "${SSH_OPTS[@]}" "$AGG_HOST" "stat -c%s -- $(shq "$1")" 2>/dev/null \
+        | tr -dc '0-9'
+}
+
+remote_mkdir() {
+    ssh "${SSH_OPTS[@]}" "$AGG_HOST" "mkdir -p -- $(shq "$AGG_DIR")" \
+        >/dev/null 2>&1
 }
 
 if [[ "$SHIP_ENABLED" != "true" ]]; then
     pending="$(ls -1 "$ENC_DIR"/*.mp4 2>/dev/null | wc -l)"
     log "auto-transfer off; $pending H.264 clip(s) waiting in $ENC_DIR"
 
-elif ssh "${SSH_OPTS[@]}" "$AGG_HOST" \
-      "powershell -NoProfile -Command \"New-Item -ItemType Directory -Force -Path '$AGG_DIR' | Out-Null\"" \
-      >/dev/null 2>&1; then
+elif remote_mkdir; then
 
     for clip in "$ENC_DIR"/*.mp4; do
         base="$(basename "$clip")"
         remote="$AGG_DIR/$base"
 
         log "shipping $base"
-        if ! scp -q "${SSH_OPTS[@]}" "$clip" "$AGG_HOST:$remote" 2>/dev/null; then
+        if ! scp -q "${SCP_OPTS[@]}" "$clip" "$AGG_HOST:$remote" 2>/dev/null; then
             log "transfer failed for $base -- will retry next run"
             continue
         fi
@@ -165,20 +187,26 @@ elif ssh "${SSH_OPTS[@]}" "$AGG_HOST" \
         # the far end truncated the file (out of disk), and since we delete the
         # local copy afterwards a false success would lose footage for good.
         ok=0
+        blank=0          # remote command returned nothing at all
         case "$VERIFY_MODE" in
             hash)
                 lsum="$(sha256sum "$clip" | cut -d' ' -f1)"
                 rsum="$(remote_hash "$remote")"
-                if [[ -n "$rsum" && "$lsum" == "$rsum" ]]; then ok=1
-                else log "hash check failed for $base (remote='${rsum:-empty}')"; fi
+                if [[ -z "$rsum" ]]; then
+                    blank=1; log "hash check got no answer for $base"
+                elif [[ "$lsum" == "$rsum" ]]; then ok=1
+                else log "hash MISMATCH for $base -- the copy on the aggregator" \
+                        "differs from the local file (truncated or corrupt)"; fi
                 ;;
             size)
                 lsz="$(stat -c%s "$clip")"
                 rsz="$(remote_size "$remote")"
-                if [[ -n "$rsz" && "$lsz" == "$rsz" ]]; then ok=1
-                else log "size check failed for $base (local=$lsz remote='${rsz:-empty}')"; fi
+                if [[ -z "$rsz" ]]; then
+                    blank=1; log "size check got no answer for $base"
+                elif [[ "$lsz" == "$rsz" ]]; then ok=1
+                else log "size MISMATCH for $base (local=$lsz remote=$rsz)" \
+                        "-- the copy on the aggregator is incomplete"; fi
                 ;;
-            none) ok=1 ;;
         esac
 
         if [[ "$ok" -eq 1 ]]; then
@@ -186,10 +214,19 @@ elif ssh "${SSH_OPTS[@]}" "$AGG_HOST" \
             log "delivered $base (verified: $VERIFY_MODE)"
         else
             log "KEEPING local copy of $base -- will retry next run"
+            if [[ "$blank" -eq 1 ]]; then
+                log "  The verify command returned nothing. The copy lands but"
+                log "  cannot be read back, so this clip re-ships every run."
+                log "  Check that the aggregator account can run sha256sum on"
+                log "  $AGG_DIR. VERIFY_MODE=\"size\" is the fallback."
+            fi
         fi
     done
 else
-    log "aggregator unreachable ($AGG_HOST) -- clips held locally for retry"
+    log "aggregator unreachable ($AGG_HOST:$AGG_PORT) -- clips held locally"
+    log "  Either the host is down, key auth is not set up, or the account"
+    log "  cannot create $AGG_DIR."
+    log "  Check with:  ssh -p $AGG_PORT $AGG_HOST true"
 fi
 
 # ---------------------------------------------------------------------------

@@ -12,22 +12,37 @@ sudo ./install.sh
 
 It installs ffmpeg and v4l-utils, creates `/opt/chopcam` and
 `/var/lib/chopcam`, builds a venv with `pycomm3` (ControlLogix),
-`python-snap7` (Siemens) and a pinned `pymodbus`,
-copies `chopcam.conf.example` to `/etc/chopcam.conf`, adds you to the `video`
-group, and installs the systemd units rewritten to run as your account.
+`python-snap7` (Siemens) and `pymodbus` — **all three pinned**, because the PLC
+drivers are the hardest part of this system to test off-site and an
+unannounced major version bump is not something you want to discover at a
+panel. It then copies `chopcam.conf.example` to `/etc/chopcam.conf`, adds you
+to the `video` group, installs the systemd units rewritten to run as your
+account, runs the unit tests, and prints a config check.
 
 Log out and back in afterwards so the `video` group takes effect.
 
+Re-running after a `git pull` is safe. It does **not** restart a running
+capture service — that would drop the ring buffer — so it tells you a restart
+is pending instead.
+
 ## 2. Set the node's static IP
+
+Addresses differ per machine — a chop line may be on `10.2.4.x` while an
+unwinder line is on `192.168.0.x`. Take this node's address and its PLC's
+address from `docs/deployments.md`, not from another node.
 
 ```bash
 sudo nmcli con show                     # find the connection name
 sudo nmcli con mod "Wired connection 1" ipv4.method manual \
-     ipv4.addresses 10.2.4.100/24 ipv4.never-default yes
+     ipv4.addresses <this-node-ip>/24 ipv4.never-default yes
 sudo nmcli con up "Wired connection 1"
 ip -brief a                             # confirm eth0 has the address
-ping -c3 10.2.4.1                       # confirm the PLC answers
+ping -c3 <plc-ip>                       # confirm the PLC answers
 ```
+
+For example, on the chop line: `ipv4.addresses 10.2.4.100/24` and
+`ping -c3 10.2.4.1`. On the unwinder line node uw1: `192.168.0.x/24` and
+`ping -c3 192.168.0.4`.
 
 `ipv4.never-default yes` keeps Wi-Fi as the default route, so SSH and internet
 still work.
@@ -38,8 +53,34 @@ still work.
 sudoedit /etc/chopcam.conf
 ```
 
-At minimum set `NODE_NAME`, `PLC_TYPE`, `PLC_PATH`, and `TRIGGER_TAG`. Every
-option is commented in the file.
+At minimum set `SITE`, `NODE_NAME`, `PLC_TYPE`, `PLC_PATH`, and `TRIGGER_TAG`.
+Every option is commented in the file.
+
+`SITE` names the install and is the same on every Pi there; the rest are
+per-node. Clips are labelled `SITE-NODE_NAME`, so `chop1` at two installs stays
+distinguishable.
+
+For a rollout, prepare each node's config first and hand it to the installer
+instead of editing on the Pi — that is the repeatable path:
+
+```bash
+sudo ./install.sh --conf uw1.conf --apply-network
+```
+
+`--apply-network` also sets the node's static IP from `NODE_IP` / `NODE_CIDR`
+in that file, so commissioning a node really is one file.
+
+`NODE_NAME` ships blank on purpose and the service refuses to start without it:
+a node running under a name copied from another Pi produces clips nobody can
+trace back to a chop point, and you cannot tell after the fact.
+
+Check the file before going any further — this catches a bad `PLC_TYPE`, an
+unparseable Siemens address or a missing `NODE_NAME` in a second, rather than
+after the service has been failing quietly:
+
+```bash
+/opt/chopcam/venv/bin/python /opt/chopcam/src/capture.py --check-config
+```
 
 ### If this line uses an Allen-Bradley ControlLogix
 
@@ -48,6 +89,9 @@ PLC_TYPE="controllogix"
 PLC_PATH="10.2.4.1"                  # add "/1" for the CPU slot in a chassis
 TRIGGER_TAG="_R1_156N0:33:O.7"
 ```
+
+On a ControlLogix line one PLC usually serves every chop point, so `PLC_PATH`
+is shared and only `TRIGGER_TAG` changes per node.
 
 **Confirm the tag name rather than trusting the default** — Rockwell output tags
 are often `...:O.Data.7` rather than `...:O.7`, or an alias:
@@ -63,11 +107,24 @@ right PLC) plus every matching tag. Paste the exact string into `TRIGGER_TAG`.
 
 ```
 PLC_TYPE="siemens"
-PLC_PATH="10.2.4.1"
-TRIGGER_TAG="DB100.DBX0.7"           # or Q0.7 / I3.2 / M10.3
+PLC_PATH="192.168.0.4"               # THIS station's PLC
+TRIGGER_TAG="M158.7"                 # or DB100.DBX0.7 / Q0.7 / I3.2
 SIEMENS_RACK="0"
 SIEMENS_SLOT="1"                     # S7-1200/1500 = 1, S7-300/400 = 2
 ```
+
+**Do not assume the PLC address is shared.** On the unwinder line every station
+has its own PLC, so `PLC_PATH` changes per node as well as `TRIGGER_TAG`:
+
+| Node | `PLC_PATH` | `TRIGGER_TAG` |
+|---|---|---|
+| uw1 | `192.168.0.4` | `M158.7` |
+| uw2 | `192.168.0.8` | `M143.5` |
+| uw3 | `192.168.0.13` | `M155.6` |
+| uw4 | `192.168.0.14` | `M148.7` |
+
+Merker (`M`) addresses need PUT/GET permitted, but not the "optimized block
+access" change — that only applies to data blocks (`DB…`).
 
 Address forms: `DB100.DBX0.7` (data block), `Q0.7` or `A0.7` (outputs),
 `I3.2` or `E3.2` (inputs), `M10.3` (merkers). Bit index must be 0–7.
@@ -87,12 +144,39 @@ doesn't apply.
 ### Verify the trigger (either family)
 
 ```bash
-/opt/chopcam/venv/bin/python /opt/chopcam/src/capture.py --test-trigger
+# watches for 30 s by default; pass seconds, or 0 to run until Ctrl-C
+/opt/chopcam/venv/bin/python /opt/chopcam/src/capture.py --test-trigger 60
 ```
 
-This connects, prints the current value, then watches for 10 seconds — toggle
-the bit and confirm it flips. If the PLC isn't connected yet it says so and
-exits, which is expected.
+This connects, prints the CPU it reached and the current value, then reports
+every transition while you toggle the bit or run a chop. If the PLC isn't
+connected yet it says so and exits, which is expected.
+
+The summary answers the two questions that decide whether the system will
+actually catch a chop:
+
+```
+polls        : 1800 in 60.0 s -> 30.0 Hz achieved (POLL_HZ=30)
+read latency : min 1.2 ms  median 2.1 ms  max 18.4 ms
+rising edges : 4
+edge spacing : min 4.9 s  max 7.2 s
+pulse width  : min 235 ms  max 512 ms
+
+VERDICT: OK -- shortest pulse 235 ms is 7x the 33 ms poll interval.
+```
+
+* **Pulse width vs poll interval.** A trigger pulse shorter than about twice
+  the poll interval gets missed intermittently — the tool says so and tells you
+  what to raise `POLL_HZ` to. Exit status is non-zero on a marginal or absent
+  trigger, so it can be scripted.
+* **Achieved rate vs `POLL_HZ`.** `POLL_HZ` is a request; the real ceiling is
+  how fast the PLC answers. If reads take 50 ms, a configured 30 Hz is really
+  20 Hz, and the verdict is judged against the rate actually achieved rather
+  than the one you asked for.
+
+**Confirm the trigger fires once per chop, and that the chop lands near the
+middle of the clip.** If a fast chop is missed, the output pulse was shorter
+than the poll interval — raise `POLL_HZ` or have controls latch the bit.
 
 ## 4. Check the camera
 
@@ -113,11 +197,41 @@ sudo systemctl enable --now chopcam-postprocess.timer
 journalctl -u chopcam -f
 ```
 
-Expect `starting camera capture`, `live preview on port 8080`, and — once the
-PLC is reachable — `PLC connected`. A few `camera stream ended; will restart`
-lines right after boot are normal while USB enumerates.
+The service logs the configuration it actually loaded on startup — node name,
+camera mode, clip geometry, PLC target — so "which value did this node really
+read" never needs answering over SSH. Expect `starting camera capture`, `live
+preview on port 8080`, and — once the PLC is reachable — `PLC connected`. A few
+`camera stream ended; will restart` lines right after boot are normal while USB
+enumerates.
+
+If the config is wrong the service refuses to start and says exactly which
+setting, rather than starting up half-working.
 
 **Reboot and confirm it comes back on its own.** That is the real test.
+
+### Check node health
+
+```bash
+curl -s http://localhost:8080/healthz | python3 -m json.tool
+```
+
+Returns HTTP 200 when the camera is delivering frames and the PLC is connected
+(or the PLC trigger is switched off), and 503 otherwise — so a wedged node is
+visible without reading the journal. `systemctl status` cannot tell you this:
+a node whose camera has dropped off still shows as `active`, because the
+service is running fine, it just has nothing to record.
+
+```json
+{
+  "node": "chop1",
+  "healthy": true,
+  "camera": { "state": "streaming", "frame_age_s": 0.01, "restarts": 0 },
+  "buffer": { "frames": 3721, "mb": 436.0, "seconds": 31.0, "memory_evictions": 0 },
+  "plc": { "state": "connected", "poll_hz": 29.9, "configured_poll_hz": 30 },
+  "triggers": { "count": 4, "last_utc": "2026-09-09T19:30:12+00:00" },
+  "clips": { "written": 4, "failed": 0 }
+}
+```
 
 ## 6. Verify a clip end to end
 
@@ -136,6 +250,7 @@ Then follow it through:
 
 ```
 /var/lib/chopcam/raw/       .mkv appears seconds after the post-roll
+                            (written as .<name>.part.mkv, then renamed)
 /var/lib/chopcam/encoded/   .mp4 after the next timer run (or force one below)
 /var/lib/chopcam/sent/      only when SHIP_ENABLED="true"
 ```
@@ -154,7 +269,10 @@ scp <pi>:/var/lib/chopcam/encoded/*.mp4 .
 ## 7. Automatic transfer (optional)
 
 Only when the aggregator exists. Set `SHIP_ENABLED="true"` plus `AGG_USER`,
-`AGG_IP`, `AGG_DIR` in `/etc/chopcam.conf`.
+`AGG_IP`, `AGG_DIR` in `/etc/chopcam.conf` — the service refuses to start with
+`SHIP_ENABLED="true"` and any of them blank, because a half-configured target
+is a way to lose footage (the node deletes its local copy once delivery
+verifies). Each machine has its own aggregator; see `docs/deployments.md`.
 
 For a **Windows** aggregator: enable OpenSSH Server (Settings → Optional
 features), then in an Administrator PowerShell:
@@ -187,7 +305,7 @@ This must print `ok` with **no prompt**, or the timer job fails silently every
 five minutes:
 
 ```bash
-ssh -o BatchMode=yes user@10.2.4.50 "powershell -NoProfile -Command \"echo ok\""
+ssh -o BatchMode=yes <agg-user>@<agg-ip> "powershell -NoProfile -Command \"echo ok\""
 ```
 
 ## Troubleshooting
@@ -204,5 +322,15 @@ ssh -o BatchMode=yes user@10.2.4.50 "powershell -NoProfile -Command \"echo ok\""
 | Siemens connection refused | wrong `SIEMENS_SLOT` (S7-1200/1500 = 1, S7-300/400 = 2) |
 | `Cannot parse Siemens address` | use `DB100.DBX0.7`, `Q0.7`, `I3.2` or `M10.3`; bit must be 0–7 |
 | `PLC config error ... trigger disabled` | bad `PLC_TYPE` or address — this is not retried; fix and restart |
+| `Refusing to start -- N configuration problem(s)` | run `--check-config`; it names each one |
+| `tag ... reads as DINT, not BOOL` | `TRIGGER_TAG` points at a word, not a bit — append the bit index, e.g. `...:O.Data.7` |
+| `PLC polling at N Hz, configured M Hz` | the PLC can't answer that fast; lower `POLL_HZ` or latch the bit |
+| `... is already TRUE at connect` | normal after a reconnect on a latched bit; no phantom clip is recorded |
+| `pre-roll short by Ns` | normal for a trigger in the first seconds after start; otherwise the ring hit `BUFFER_MAX_MB` — check `buffer.memory_evictions` in `/healthz` |
+| `ring buffer hit its N MB ceiling` | the stream is fatter than budgeted; raise `BUFFER_MAX_MB` *and* `MemoryMax=` in `chopcam.service` |
+| `/healthz` returns 503 | camera stalled, trigger disconnected, or the ring buffer is memory-bound; the JSON says which |
+| `modbus trigger DISABLED` | port busy, privileged (needs `CAP_NET_BIND_SERVICE`), or pymodbus missing — capture keeps running regardless |
+| PLC-pushed trigger never fires | check `MODBUS_TRIGGER_PDU`: a PLC writing "coil 00001" arrives as PDU `0`. Every coil write is logged with the PDU it landed on |
+| `is the address from the shipped example` | `PLC_PATH` was copied from the example and may not be this machine's PLC |
 | `hash check failed (remote='empty')` | PowerShell quoting; set `VERIFY_MODE="size"` |
 | Disk filling | `SHIP_ENABLED="false"` keeps every clip forever; copy them off and delete |

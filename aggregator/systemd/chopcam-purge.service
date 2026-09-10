@@ -1,0 +1,32 @@
+[Unit]
+Description=chopcam aggregator - delete clips past retention
+Documentation=file:/opt/chopcam-agg/README.md
+
+[Service]
+Type=oneshot
+
+# install-aggregator.sh rewrites User/Group to the installing account.
+User=chopcam
+Group=chopcam
+
+ExecStart=/usr/bin/python3 /opt/chopcam-agg/purge.py
+Environment=CHOPCAM_AGG_CONF=/etc/chopcam-agg.conf
+
+# The config is read on every run, so editing RETENTION_DAYS takes effect on
+# the next pass without restarting anything.
+
+Nice=19
+IOSchedulingClass=idle
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=chopcam-purge
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/srv/chopcam
+
+[Install]
+WantedBy=multi-user.target

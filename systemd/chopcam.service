@@ -21,6 +21,7 @@ User=chopcam
 Group=chopcam
 SupplementaryGroups=video
 
+
 WorkingDirectory=/opt/chopcam
 ExecStart=/opt/chopcam/venv/bin/python /opt/chopcam/src/capture.py
 Environment=CHOPCAM_CONF=/etc/chopcam.conf
@@ -39,8 +40,13 @@ StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=chopcam
 
-# Ring buffer is ~400 MB at 1080p120 / 30 s. Clear of that, but low enough that
+# The ring buffer holds ~436 MB at 1080p120 over a 31 s window (measured), and
+# its own hard ceiling (BUFFER_MAX_MB, default 620 MB) sits above that. This is
+# clear of both, with room for the interpreter and ffmpeg, but low enough that
 # a runaway can't push a 4 GB Pi into swap.
+#
+# capture.py reads this limit at startup and warns if BUFFER_MAX_MB is too
+# close to it -- so if you lengthen PRE_SECONDS/POST_SECONDS, raise this too.
 MemoryMax=1500M
 
 # Capture must not lose frames to CPU contention. postprocess is nice'd to 19

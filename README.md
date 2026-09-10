@@ -14,13 +14,17 @@ H.264 and collected on an aggregator for review in slow motion.
 |---|---|
 | Capture, ring buffer, clip writing | **working** |
 | Live preview (HTTP) | **working** |
+| Node health endpoint (`/healthz`) | **working** |
 | Modbus bench trigger | **working** |
 | Auto-start on boot, crash recovery | **working** |
 | H.264 transcode on a timer | **working** |
+| Config validation + unit tests | **working** |
 | PLC trigger — ControlLogix (EtherNet/IP) | **written, never tested against a real PLC** |
 | PLC trigger — Siemens S7 (ISO-on-TCP) | **written, never tested against a real PLC** |
-| Transfer to aggregator | **written, never tested end to end** |
-| Aggregator / preview wall | **not built** |
+| Transfer to aggregator (Linux) | **tested end to end, not on real hardware** |
+| Aggregator — live wall + node status | **built, not run on real hardware** |
+| Aggregator — last-chop playback + slow motion | **built, not run on real hardware** |
+| Aggregator — clip retention (auto-delete) | **built, not run on real hardware** |
 | Nodes 2–5 | **not purchased** |
 
 Read `HANDOFF.md` before changing anything. It records what was measured, what
@@ -61,6 +65,23 @@ The split matters: capture must never drop frames, and `libx264` on a Pi 4
 takes about **ten minutes** per clip. So the writer only copies compressed
 bytes, and all encoding happens later at idle priority.
 
+## Two roles
+
+One repo, two machines. They share the config format and the clip-naming
+contract, which is why they live together — a node and its aggregator cannot
+drift apart on how a value is spelled or how a clip is named.
+
+| | Capture node (Pi 4, one per chop point) | Aggregator (Pi 5, one per install) |
+|---|---|---|
+| Code | `src/` | `aggregator/` |
+| Setup | `sudo ./install.sh` | `sudo aggregator/install-aggregator.sh` |
+| Config | `/etc/chopcam.conf` | `/etc/chopcam-agg.conf` |
+| Does | buffers, triggers, records, transcodes, ships | receives clips, drives the wall, plays back chops, deletes old footage |
+
+An install is one aggregator plus however many nodes that machine needs.
+Adding a camera is a new node config plus one entry in the aggregator's
+`NODES`. See `aggregator/README.md` and `docs/deployments.md`.
+
 ## Layout
 
 ```
@@ -70,6 +91,8 @@ src/capture.py         capture service (buffer, triggers, preview, clip writer)
 src/plc.py             PLC drivers: ControlLogix + Siemens behind one interface
 src/postprocess.sh     transcode, ship, purge
 systemd/               service + timer units
+aggregator/            the aggregator half — wall, node status, clip landing
+tests/                 unit tests — run with no PLC and no camera attached
 docs/hardware.md       parts, measurements, camera and lens notes
 HANDOFF.md             design reasoning and open items — read this
 INSTALL.md             step-by-step deployment
@@ -80,13 +103,17 @@ INSTALL.md             step-by-step deployment
 ```bash
 git clone <repo> && cd chopcam
 sudo ./install.sh
-sudoedit /etc/chopcam.conf          # NODE_NAME, PLC_PATH, TRIGGER_TAG
+sudoedit /etc/chopcam.conf          # NODE_NAME, PLC_TYPE, PLC_PATH, TRIGGER_TAG
+/opt/chopcam/venv/bin/python /opt/chopcam/src/capture.py --check-config
 sudo systemctl enable --now chopcam.service
 sudo systemctl enable --now chopcam-postprocess.timer
 journalctl -u chopcam -f
 ```
 
-Live preview: `http://<pi>:8080/`
+Live preview: `http://<pi>:8080/` — node health: `http://<pi>:8080/healthz`
+
+The service refuses to start on a bad config rather than running half-working,
+so `--check-config` tells you everything wrong in one pass.
 
 Fire a test clip without the PLC:
 
@@ -113,5 +140,24 @@ PLC_TYPE="siemens"        TRIGGER_TAG="DB100.DBX0.7"   # + SIEMENS_RACK/SLOT
 Verify the trigger before starting the service — works for either family:
 
 ```bash
-/opt/chopcam/venv/bin/python /opt/chopcam/src/capture.py --test-trigger
+/opt/chopcam/venv/bin/python /opt/chopcam/src/capture.py --test-trigger 60
 ```
+
+That does more than prove the connection: it reports how wide the trigger
+pulses actually are and what poll rate the PLC really sustains, and fails with
+a non-zero exit if a pulse is too short to be caught reliably.
+
+Adding a *third* PLC family is a subclass of `TriggerSource` plus one
+`register_source()` call in `src/plc.py`. Nothing in the capture path changes.
+
+## Tests
+
+```bash
+python3 -m unittest discover -s tests -v
+```
+
+No PLC, no camera and no PLC libraries needed — the suite covers Siemens
+address parsing, driver construction for every `PLC_TYPE` alias, config
+parsing (including that bash and Python read `chopcam.conf` identically), clip
+naming, JPEG frame splitting, and the clip mux against real ffmpeg output.
+`install.sh` runs it on every install.
