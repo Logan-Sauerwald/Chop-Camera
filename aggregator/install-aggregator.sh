@@ -47,13 +47,16 @@ REPO="$(cd "$HERE/.." && pwd)"
 
 echo "==> Packages"
 apt-get update -qq
-# No PLC libraries and no ffmpeg here: the aggregator never decodes or encodes
-# video. The browser renders the MJPEG tiles straight from the nodes.
-apt-get install -y -qq python3 rsync
+# No PLC libraries: the aggregator never talks to a PLC. ffmpeg is here only to
+# REMUX slow-motion downloads (-itsscale with -c copy), which is a container
+# rewrite taking a fraction of a second -- it never decodes or encodes video.
+# The browser renders the MJPEG tiles straight from the nodes.
+apt-get install -y -qq python3 ffmpeg
 
 echo "==> Files"
 mkdir -p "$INSTALL_DIR"
 install -m 0755 "$HERE/wall.py" "$INSTALL_DIR/wall.py"
+install -m 0755 "$HERE/purge.py" "$INSTALL_DIR/purge.py"
 # The shared config reader, so the aggregator parses chopcam.conf files exactly
 # as the nodes do rather than growing a second parser that can drift.
 install -m 0644 "$REPO/src/chopcam_config.py" "$INSTALL_DIR/chopcam_config.py"
@@ -86,10 +89,14 @@ chown -R "$RUN_USER":"$RUN_USER" "$INCOMING_DIR"
 echo "    $INCOMING_DIR (owner $RUN_USER)"
 
 echo "==> systemd"
-sed -e "s/^User=.*/User=$RUN_USER/" \
-    -e "s/^Group=.*/Group=$RUN_USER/" \
-    -e "s#^ReadWritePaths=.*#ReadWritePaths=$INCOMING_DIR#" \
-    "$HERE/systemd/chopcam-wall.service" > /etc/systemd/system/chopcam-wall.service
+for unit in chopcam-wall.service chopcam-purge.service; do
+    sed -e "s/^User=.*/User=$RUN_USER/" \
+        -e "s/^Group=.*/Group=$RUN_USER/" \
+        -e "s#^ReadWritePaths=.*#ReadWritePaths=$INCOMING_DIR#" \
+        "$HERE/systemd/$unit" > "/etc/systemd/system/$unit"
+done
+install -m 0644 "$HERE/systemd/chopcam-purge.timer" \
+        /etc/systemd/system/chopcam-purge.timer
 systemctl daemon-reload
 
 echo "==> Config check"
@@ -118,9 +125,15 @@ Next:
      Confirm from a node, with NO password prompt:
        ssh -o BatchMode=yes $RUN_USER@<this-ip> true && echo ok
 
-  3. Start the wall:
+  3. Start the wall and the retention timer:
        sudo systemctl enable --now chopcam-wall.service
+       sudo systemctl enable --now chopcam-purge.timer
        journalctl -u chopcam-wall -f
+
+     Retention is RETENTION_DAYS in $CONF (default 7). The timer re-reads that
+     file every run, so changing the number takes effect on the next pass --
+     no restart. See what it would do without deleting anything:
+       python3 $INSTALL_DIR/purge.py --dry-run
 
   4. Open it:   http://<this-aggregator>:${WALL_PORT:-8090}/
      Status:    http://<this-aggregator>:${WALL_PORT:-8090}/status

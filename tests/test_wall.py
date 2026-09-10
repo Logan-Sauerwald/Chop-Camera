@@ -30,6 +30,13 @@ os.environ["CHOPCAM_AGG_CONF"] = _conf
 
 wall = importlib.import_module("wall")
 
+# wall reads its config at import time, and another test module may have
+# imported it first (purge.py imports it too), in which case the cached module
+# carries that module's settings. Force the ones these tests rely on.
+wall.SITE = "line3"
+wall.NODES = wall.parse_nodes("uw1=192.168.0.101 uw2=192.168.0.102")
+wall.INCOMING_DIR = _incoming
+
 
 class TestParseNodes(unittest.TestCase):
 

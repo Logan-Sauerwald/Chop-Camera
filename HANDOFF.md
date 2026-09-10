@@ -366,6 +366,90 @@ than a built-in default. Also worth setting: `power_line_frequency` (2 = 60 Hz
 in North America; the camera defaults to 50 Hz), and `focus_automatic_continuous=0`
 so autofocus cannot hunt mid-chop on a fixed mount.
 
+## Playback, and why 0.25x is the default
+
+The aggregator's player opens at quarter speed, not real speed, and that is a
+measurement rather than a preference.
+
+**On a 60 Hz monitor a 120 fps clip played at 1x can only show 60 of every 120
+frames.** Half of what the camera captured is discarded at the display stage,
+no matter how fast the machine is. At 0.25x the clip presents 30 frames a
+second, comfortably under the refresh rate, so every captured frame is actually
+displayed. Slow motion is not a convenience here; it is the only way to see
+what the 120 fps capture bought.
+
+Verified in a browser: `playbackRate = 0.25` advanced 0.75 s of video in 3.00 s
+of wall clock, a ratio of exactly 0.25, with no frame duplication.
+
+### The Pi 5 has no hardware H.264 decoder either
+
+It kept HEVC hardware decode but the H.264 block was removed, so H.264 is
+software-decoded on the CPU. That is survivable *because* of the above: at
+0.25x the browser decodes about 30 frames a second, not 120. Real-time 1x
+playback is the marginal case and may stutter; it is also the least useful
+mode. A laptop plugged into the switch has hardware decode and handles 1x and
+heavy seeking better, which is the right place for careful review.
+
+### Slow-motion downloads are a remux, not an encode
+
+`-itsscale 4` with `-c copy` rescales the input timestamps: a 120 fps clip is
+restamped to 30 fps with every frame intact. Measured: 600 frames in, 600
+frames out, 5.00 s becomes 19.98 s, **0.08 s to produce**, same file size.
+
+This matters because the Pi 5 has no H.264 *encoder* either -- re-encoding on
+demand would be hopeless, but a container rewrite is free. It also replaced
+`PLAYBACK_MODE="slowmo"` on the node, which used to bake the decision into the
+archive at encode time. Clips are now always stored at true speed, and slow
+motion is a viewing choice made on the way out.
+
+### Range requests are what make the player work
+
+`BaseHTTPRequestHandler` has no `Range:` support, so `wall.py` implements it.
+Without it a browser re-fetches from byte zero on every seek, which makes the
+seek bar useless. Adding it was *less* work than avoiding it: with ranges the
+native `<video controls>` element does play, pause and seek for free, where
+without them the seek bar has to be hidden behind hand-built controls.
+
+Stock `python3 -m http.server` answers a Range request with `200` and the whole
+file; `wall.py` answers `206` with the byte range, and `416` for an
+unsatisfiable one.
+
+### Opening the player stops the live streams
+
+Each tile is an MJPEG `<img>` holding an open connection and decoding
+continuously. Leaving several of those running while the Pi 5 software-decodes
+a 120 fps clip is what makes playback stutter, so the player blanks their `src`
+on open and restores it on exit. Hiding the elements is not enough -- a hidden
+`<img>` keeps streaming.
+
+### "Chop processing" comes from data the system already had
+
+Each node's `/healthz` reports when its trigger last fired; the aggregator knows
+what has landed on disk. A trigger newer than anything delivered means a chop is
+in the pipeline, and the node's counts of `raw/` and `encoded/` say which stage.
+
+The same comparison is the only thing in the system that detects a **stuck
+pipeline**. Past `STUCK_MINUTES` the tile reads "Chop delayed" and the node
+counts as degraded -- a wedged transcode, a full disk or broken key auth would
+otherwise show up as footage that quietly never appears, discovered weeks later
+by someone looking for it.
+
+Caveat: the trigger time lives in the node's memory, so a node restart clears
+it and there is no badge until the next chop. The failure mode is safe -- it
+shows nothing rather than something wrong.
+
+### Deleting footage is guarded
+
+`purge.py` is the only code that deletes clips, so it refuses to run against a
+path like `/`, `/home` or `/etc`, never follows a symlink out of the clip
+directory, and takes a clip's age from the timestamp in its **filename** rather
+than its mtime -- a node delivering a backlog after being offline would
+otherwise look like a pile of brand-new footage and reset the clock on all of
+it.
+
+`DISK_PCT_LIMIT` values below 50 are clamped up: a typo there would empty the
+archive on a healthy disk.
+
 ## Why one Pi per camera
 
 Two independent reasons.

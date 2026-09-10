@@ -249,20 +249,24 @@ CLIP_TIMESTAMP="utc"
 # --- storage ----------------------------------------------------------------
 STATE_DIR="/var/lib/chopcam"
 
-# "mjpeg" = stream-copy: clip written in ~0.1 s, near-zero CPU. USE THIS.
-# "h264"  = encode inline instead. Measured ~10 MINUTES per 30 s clip on a
-#           Pi 4 at full CPU, competing with the 120 fps capture thread.
-#           postprocess.sh does the H.264 conversion later instead.
-CAPTURE_ENCODE="mjpeg"
-
 # --- post-processing --------------------------------------------------------
 CRF="23"                 # H.264 quality; lower = bigger/better
-PRESET="veryfast"        # best speed/size tradeoff on a Pi 4 for this material
 
-# realtime -> true 120 fps preserved; scrub frame-by-frame to inspect
-# slowmo   -> retimed to 30 fps output, so it PLAYS at 4x slow motion in any
-#             player with no scrubbing. Every frame kept either way.
-PLAYBACK_MODE="realtime"
+# Transcode speed. This is the floor on how soon a chop is viewable: libx264
+# runs ~6 fps on 1080p120 material, so a 30 s clip is minutes of Pi 4 CPU even
+# at idle priority. "ultrafast" roughly halves that for ~15% more size, which
+# is the right trade when someone is waiting to look at the clip.
+PRESET="ultrafast"
+
+# Keyframe interval, in frames. Short keyframes make seeking responsive in the
+# aggregator's player -- stepping back only decodes from the nearest keyframe
+# rather than up to two seconds of frames. 30 is a quarter second at 120 fps.
+GOP="30"
+
+# Clips are always written at TRUE SPEED, with every frame. Slow motion is a
+# viewing choice, not an encoding one: the aggregator plays them at 0.25x and
+# its download button hands you a 4x slow copy made by remuxing (no re-encode,
+# every frame kept), so the archive stays true-speed and reversible.
 
 # --- transfer to aggregator -------------------------------------------------
 # "false" = transcode only; clips stay in $STATE_DIR/encoded and you scp them
@@ -279,16 +283,6 @@ AGG_USER=""
 AGG_IP=""
 AGG_DIR=""
 
-# Which command set the aggregator understands. The aggregator is a Pi 5
-# running Pi OS, so "linux" is right; "windows" is for a PowerShell host.
-#
-# Getting this wrong is not a loud failure. The upload still succeeds, but the
-# verify command returns nothing, the clip is never marked delivered, and the
-# SAME clip re-ships every timer run forever -- duplicates piling up on the
-# aggregator while the node's encoded/ never drains. postprocess.sh names
-# AGG_OS in the log when it sees that signature.
-AGG_OS="linux"
-
 # SSH port on the aggregator. 22 unless the plant uses something else.
 AGG_PORT="22"
 
@@ -296,7 +290,6 @@ AGG_PORT="22"
 #   hash - SHA-256 compared on both ends (strongest)
 #   size - byte-size comparison; catches truncation, which is the realistic
 #          failure since SSH already guarantees integrity in transit
-#   none - trust scp's exit status (debugging only)
 VERIFY_MODE="hash"
 
 # Local copy kept this long AFTER confirmed delivery, so an aggregator rebuild

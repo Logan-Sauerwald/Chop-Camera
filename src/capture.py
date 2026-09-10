@@ -145,12 +145,14 @@ SHIP_ENABLED = _b("SHIP_ENABLED", False)
 AGG_USER     = _s("AGG_USER", "")
 AGG_IP       = _s("AGG_IP", "")
 AGG_DIR      = _s("AGG_DIR", "")
-AGG_OS       = _s("AGG_OS", "linux").strip().lower()
 AGG_PORT     = _i("AGG_PORT", 22)
 
 STATE_DIR  = _s("STATE_DIR", "/var/lib/chopcam")
 OUTPUT_DIR = os.path.join(STATE_DIR, "raw")
-ENCODE     = _s("CAPTURE_ENCODE", "mjpeg")
+# postprocess.sh owns these; capture.py only counts what is in them, which is
+# enough to say where a chop is in the pipeline without any plumbing between
+# the two processes.
+ENCODED_DIR = os.path.join(STATE_DIR, "encoded")
 CLIP_TIMESTAMP = _s("CLIP_TIMESTAMP", "utc").strip().lower()
 
 # ---------------------------------------------------------------------------
@@ -352,12 +354,6 @@ def validate_config():
             f"CLIP_TIMESTAMP={CLIP_TIMESTAMP!r} must be \"utc\" or \"local\"."
         )
 
-    if ENCODE not in ("mjpeg", "h264"):
-        problems.append(
-            f"CAPTURE_ENCODE={ENCODE!r} must be \"mjpeg\" or \"h264\". "
-            "Use \"mjpeg\" unless you know why you want otherwise."
-        )
-
     if PLC_TRIGGER:
         # Builds the driver object (which parses the address) without
         # connecting, so a bad PLC_TYPE or Siemens address is caught here
@@ -369,14 +365,6 @@ def validate_config():
             problems.append(f"PLC config: {exc}")
         except ImportError as exc:                    # pragma: no cover
             problems.append(f"PLC driver import failed: {exc}")
-
-    if SHIP_ENABLED and AGG_OS not in ("linux", "windows"):
-        problems.append(
-            f"AGG_OS={AGG_OS!r} must be \"linux\" or \"windows\". The "
-            "aggregator is a Pi 5 running Pi OS, so \"linux\" is normal; "
-            "getting this wrong means clips upload but never verify, and the "
-            "same clip re-ships every timer run."
-        )
 
     if SHIP_ENABLED:
         # Shipping to the wrong host is worse than not shipping: the node
@@ -507,8 +495,8 @@ def log_effective_config():
     log.info("  buffer : %ds window, %d MB ceiling  (~%.0f MB expected at "
              "120 fps / 118 Mbps)",
              BUFFER_SECONDS, BUFFER_MAX_MB, BUFFER_SECONDS * 14.75)
-    log.info("  clip   : -%ds / +%ds, encode=%s, timestamps=%s",
-             PRE_SECONDS, POST_SECONDS, ENCODE, CLIP_TIMESTAMP)
+    log.info("  clip   : -%ds / +%ds, timestamps=%s",
+             PRE_SECONDS, POST_SECONDS, CLIP_TIMESTAMP)
     if PLC_TRIGGER:
         log.info("  plc    : %s %s tag %s @ %d Hz",
                  PLC_TYPE, PLC_PATH, TRIGGER_TAG, POLL_HZ)
@@ -942,10 +930,27 @@ def _live_page():
 </body></html>""" % {"node": CLIP_ID}).encode("utf-8")
 
 
+def _pending_counts():
+    """Clips waiting to be transcoded and waiting to be shipped.
+
+    A directory count on each poll, which is cheap, and it is all the
+    aggregator needs to say whether a chop it knows fired is still being
+    transcoded, is waiting to be sent, or has gone missing entirely. Dotfiles
+    are skipped: those are the in-progress .part writes.
+    """
+    def count(path):
+        try:
+            return sum(1 for n in os.listdir(path) if not n.startswith("."))
+        except OSError:
+            return 0
+    return count(OUTPUT_DIR), count(ENCODED_DIR)
+
+
 def health_snapshot():
     """Node status for /healthz. Cheap enough to serve on every request."""
     now = time.monotonic()
     ring = frame_buffer.stats()
+    awaiting_transcode, awaiting_ship = _pending_counts()
     with _status_lock:
         st = dict(_status)
 
@@ -1018,6 +1023,11 @@ def health_snapshot():
             "written": st["clips_written"],
             "failed": st["clips_failed"],
             "last": st["clip_last"],
+            # Where chops are in the pipeline. The aggregator turns these into
+            # "processing" / "sending" on the tile, and a chop that is in
+            # neither queue yet still hasn't arrived is a stuck pipeline.
+            "awaiting_transcode": awaiting_transcode,
+            "awaiting_ship": awaiting_ship,
         },
     }
 
@@ -1341,9 +1351,11 @@ def writer_loop():
         # the log for anyone who needs it.
         mux_fps = max(1, round(fps))
 
-        # MJPEG goes in Matroska: MJPEG-in-MP4 is poorly supported by players,
-        # and postprocess.sh looks for .mkv. H.264 stays .mp4.
-        ext = "mkv" if ENCODE == "mjpeg" else "mp4"
+        # MJPEG in Matroska: MJPEG-in-MP4 is poorly supported by players, and
+        # postprocess.sh looks for .mkv. Encoding here is never an option --
+        # libx264 runs ~6 fps on this material, so a 30 s clip would peg the
+        # CPU for ten minutes while the capture thread is feeding a 120 fps
+        # buffer. postprocess.sh does it later at idle priority.
         base = clip_basename(t_wall)
         meta = {
             "title": f"{CLIP_ID} {t_wall.isoformat(timespec='seconds')}",
@@ -1353,10 +1365,10 @@ def writer_loop():
                         f"mux_fps={mux_fps} "
                         f"pre={PRE_SECONDS}s post={POST_SECONDS}s"),
         }
-        _mux(clip, mux_fps, OUTPUT_DIR, base, ext, meta, measured_fps=fps)
+        _mux(clip, mux_fps, OUTPUT_DIR, base, meta, measured_fps=fps)
 
 
-def _mux(clip, fps, out_dir, base, ext, meta, measured_fps=None):
+def _mux(clip, fps, out_dir, base, meta, measured_fps=None):
     """Stream frames into ffmpeg's stdin.
 
     Deliberately NOT b"".join(...): at 120 fps a 30 s clip is ~400 MB, and
@@ -1367,14 +1379,9 @@ def _mux(clip, fps, out_dir, base, ext, meta, measured_fps=None):
     postprocess.sh can never pick up a half-written clip (its glob skips
     dotfiles) and a crash mid-write leaves nothing that looks complete.
     """
-    out_path = os.path.join(out_dir, f"{base}.{ext}")
-    tmp_path = os.path.join(out_dir, f".{base}.part.{ext}")
-
-    if ENCODE == "mjpeg":
-        video = ["-c:v", "copy", "-f", "matroska"]
-    else:
-        video = ["-c:v", "libx264", "-preset", "veryfast",
-                 "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-f", "mp4"]
+    out_path = os.path.join(out_dir, f"{base}.mkv")
+    tmp_path = os.path.join(out_dir, f".{base}.part.mkv")
+    video = ["-c:v", "copy", "-f", "matroska"]
 
     meta_args = []
     for key, val in meta.items():

@@ -118,7 +118,7 @@ class TestMux(unittest.TestCase):
 
     def test_writes_mkv_keeping_every_frame(self):
         meta = {"title": "chop2 test", "comment": "node=chop2 trigger=modbus"}
-        capture._mux(self.clip, 120.0, self.out, "event_test_chop2", "mkv", meta)
+        capture._mux(self.clip, 120.0, self.out, "event_test_chop2", meta)
         path = os.path.join(self.out, "event_test_chop2.mkv")
         self.assertTrue(os.path.exists(path), os.listdir(self.out))
         info = probe(path)
@@ -129,7 +129,7 @@ class TestMux(unittest.TestCase):
         # Node identity has to survive a rename on the aggregator.
         meta = {"title": "chop2 2026-09-09T19:30:12+00:00",
                 "comment": "node=chop2 trigger=plc tag=DB100.DBX0.7"}
-        capture._mux(self.clip, 120.0, self.out, "event_meta_chop2", "mkv", meta)
+        capture._mux(self.clip, 120.0, self.out, "event_meta_chop2", meta)
         info = probe(os.path.join(self.out, "event_meta_chop2.mkv"))
         tags = {k.lower(): v for k, v in info["format"].get("tags", {}).items()}
         self.assertIn("chop2", tags.get("title", ""))
@@ -142,7 +142,7 @@ class TestMux(unittest.TestCase):
         # writer_loop therefore muxes at a whole number; if that rounding is
         # ever removed, these durations collapse.
         for rate in (30, 100, 120):
-            capture._mux(self.clip, rate, self.out, f"event_r{rate}", "mkv", {})
+            capture._mux(self.clip, rate, self.out, f"event_r{rate}", {})
             info = probe(os.path.join(self.out, f"event_r{rate}.mkv"))
             self.assertEqual(int(info["streams"][0]["nb_read_packets"]), 30)
             duration = float(info["format"]["duration"])
@@ -153,7 +153,7 @@ class TestMux(unittest.TestCase):
     def test_fractional_rate_is_coerced_to_an_integer(self):
         # 100.25 is one of the rates that corrupts the timeline if passed
         # through verbatim.
-        capture._mux(self.clip, 100.25, self.out, "event_frac", "mkv", {})
+        capture._mux(self.clip, 100.25, self.out, "event_frac", {})
         info = probe(os.path.join(self.out, "event_frac.mkv"))
         self.assertEqual(int(info["streams"][0]["nb_read_packets"]), 30)
         duration = float(info["format"]["duration"])
@@ -166,7 +166,7 @@ class TestMux(unittest.TestCase):
             self.assertEqual(max(1, round(measured)), want)
 
     def test_no_part_file_is_left_behind(self):
-        capture._mux(self.clip, 120.0, self.out, "event_clean_chop2", "mkv", {})
+        capture._mux(self.clip, 120.0, self.out, "event_clean_chop2", {})
         leftovers = [f for f in os.listdir(self.out) if ".part." in f]
         self.assertEqual(leftovers, [])
 
@@ -174,7 +174,7 @@ class TestMux(unittest.TestCase):
         # A clip of non-JPEG bytes makes ffmpeg fail; the writer must not
         # publish a name that postprocess.sh would then treat as complete.
         bad = [(0.0, b"not a jpeg at all")]
-        capture._mux(bad, 120.0, self.out, "event_bad_chop2", "mkv", {})
+        capture._mux(bad, 120.0, self.out, "event_bad_chop2", {})
         self.assertFalse(os.path.exists(os.path.join(self.out,
                                                      "event_bad_chop2.mkv")))
         self.assertEqual([f for f in os.listdir(self.out) if ".part." in f], [])
@@ -285,14 +285,19 @@ class TestHealth(unittest.TestCase):
 
     def setUp(self):
         import time
-        self._saved = (capture.PLC_TRIGGER, dict(capture._status))
+        self._saved = (capture.PLC_TRIGGER, capture.MODBUS_TEST_TRIGGER,
+                       dict(capture._status))
         self.now = time.monotonic()
+        # The gate reads BOTH trigger settings, so both are pinned here rather
+        # than inherited from whichever config imported capture first.
+        capture.MODBUS_TEST_TRIGGER = False
 
     def tearDown(self):
         capture.PLC_TRIGGER = self._saved[0]
+        capture.MODBUS_TEST_TRIGGER = self._saved[1]
         with capture._status_lock:
             capture._status.clear()
-            capture._status.update(self._saved[1])
+            capture._status.update(self._saved[2])
         capture.frame_buffer.clear()
 
     def _frame(self, age_s):
@@ -348,6 +353,33 @@ class TestHealth(unittest.TestCase):
         self._frame(0.05)
         health = capture.health_snapshot()
         self.assertTrue(health["healthy"], health)
+
+    def test_modbus_only_node_is_unhealthy_when_its_port_is_dead(self):
+        # With the PLC trigger off, Modbus is the only way in, so its failure
+        # has to make the node unhealthy rather than being a warning.
+        capture.PLC_TRIGGER = False
+        capture.MODBUS_TEST_TRIGGER = True
+        with capture._status_lock:
+            capture._status["modbus_state"] = "error"
+        self._frame(0.05)
+        self.assertFalse(capture.health_snapshot()["healthy"])
+
+        with capture._status_lock:
+            capture._status["modbus_state"] = "listening"
+        self.assertTrue(capture.health_snapshot()["healthy"])
+
+    def test_modbus_failure_is_only_a_warning_when_the_plc_is_the_trigger(self):
+        # With the PLC polled, Modbus is a bench aid; losing it must not take
+        # the node out of service.
+        capture.PLC_TRIGGER = True
+        capture.MODBUS_TEST_TRIGGER = True
+        with capture._status_lock:
+            capture._status["plc_state"] = "connected"
+            capture._status["modbus_state"] = "error"
+        self._frame(0.05)
+        health = capture.health_snapshot()
+        self.assertTrue(health["healthy"], health)
+        self.assertFalse(health["modbus"]["ok"])
 
     def test_snapshot_is_json_serialisable(self):
         self._plc(True, "connected")

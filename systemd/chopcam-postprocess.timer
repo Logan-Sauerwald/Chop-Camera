@@ -6,13 +6,16 @@ Documentation=file:/opt/chopcam/README.md
 # 2 min after boot: lets capture settle and the network come up first.
 OnBootSec=2min
 
-# Every 5 min. At one chop per hour most runs exit in under a second. The short
-# interval matters for recovery: if the aggregator was down, clips retry 12
-# times an hour instead of waiting for someone to notice.
-OnUnitActiveSec=5min
+# Every minute. Most runs exit in under a second with nothing to do, and an
+# flock stops a long transcode from overlapping the next tick.
+#
+# The short interval is what keeps "view the last chop" close to live: waiting
+# for the timer is dead time on top of the transcode, which is already the
+# floor. It also means a clip retries often if the aggregator was down.
+OnUnitActiveSec=1min
 
-# Stagger the five nodes so they don't transcode and upload in lockstep.
-RandomizedDelaySec=60
+# Stagger the nodes so they don't transcode and upload in lockstep.
+RandomizedDelaySec=20
 
 # If the node was off when a run was due, run once on next boot. Safe because
 # postprocess.sh takes an flock.

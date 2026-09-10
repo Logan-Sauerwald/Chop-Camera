@@ -23,7 +23,8 @@ H.264 and collected on an aggregator for review in slow motion.
 | PLC trigger — Siemens S7 (ISO-on-TCP) | **written, never tested against a real PLC** |
 | Transfer to aggregator (Linux) | **tested end to end, not on real hardware** |
 | Aggregator — live wall + node status | **built, not run on real hardware** |
-| Aggregator — clip retention / playback | **not built** |
+| Aggregator — last-chop playback + slow motion | **built, not run on real hardware** |
+| Aggregator — clip retention (auto-delete) | **built, not run on real hardware** |
 | Nodes 2–5 | **not purchased** |
 
 Read `HANDOFF.md` before changing anything. It records what was measured, what
@@ -75,7 +76,7 @@ drift apart on how a value is spelled or how a clip is named.
 | Code | `src/` | `aggregator/` |
 | Setup | `sudo ./install.sh` | `sudo aggregator/install-aggregator.sh` |
 | Config | `/etc/chopcam.conf` | `/etc/chopcam-agg.conf` |
-| Does | buffers, triggers, records, transcodes, ships | receives clips, drives the wall, shows node health |
+| Does | buffers, triggers, records, transcodes, ships | receives clips, drives the wall, plays back chops, deletes old footage |
 
 An install is one aggregator plus however many nodes that machine needs.
 Adding a camera is a new node config plus one entry in the aggregator's

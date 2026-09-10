@@ -43,13 +43,15 @@ SHIP_ENABLED="${SHIP_ENABLED:-false}"
 AGG_HOST="${AGG_USER:-user}@${AGG_IP:-127.0.0.1}"
 AGG_DIR="${AGG_DIR:-/tmp}"
 VERIFY_MODE="${VERIFY_MODE:-hash}"
-AGG_OS="${AGG_OS:-linux}"
 AGG_PORT="${AGG_PORT:-22}"
 LOCAL_RETENTION_DAYS="${LOCAL_RETENTION_DAYS:-3}"
 DISK_PCT_LIMIT="${DISK_PCT_LIMIT:-85}"
 CRF="${CRF:-23}"
-PRESET="${PRESET:-veryfast}"
-PLAYBACK_MODE="${PLAYBACK_MODE:-realtime}"
+PRESET="${PRESET:-ultrafast}"
+# Keyframe interval. Short keyframes make seeking in the player responsive:
+# a step backwards only has to decode from the nearest keyframe, not up to two
+# seconds of frames. Costs ~10-15% file size.
+GOP="${GOP:-30}"
 
 # ---------------------------------------------------------------------------
 
@@ -112,18 +114,10 @@ for raw in "$RAW_DIR"/*.mkv; do
     src_frames="$(frame_count "$raw")"
     log "transcoding $base (${src_frames:-?} frames)"
 
-    if [[ "$PLAYBACK_MODE" == "slowmo" ]]; then
-        # Keep every frame but stamp them at 30 fps, so the clip plays back at
-        # 1/4 speed in any player without the viewer doing anything.
-        timing=(-vf "setpts=4.0*PTS" -r 30)
-    else
-        timing=()
-    fi
-
     rm -f "$tmp"
     if ! ffmpeg -nostdin -hide_banner -loglevel error -y \
-            -i "$raw" "${timing[@]}" \
-            -c:v libx264 -preset "$PRESET" -crf "$CRF" \
+            -i "$raw" \
+            -c:v libx264 -preset "$PRESET" -crf "$CRF" -g "$GOP" \
             -pix_fmt yuv420p -movflags +faststart \
             "$tmp"; then
         log "ERROR: ffmpeg failed on $base -- keeping raw for retry"
@@ -149,61 +143,28 @@ done
 # STAGE 2 -- ship to aggregator, verify, retain locally
 # ---------------------------------------------------------------------------
 
-# Remote helpers. AGG_OS selects the command set: the aggregator is a Pi 5
-# running Pi OS, so "linux" is the default. "windows" is kept for a PowerShell
-# aggregator, where the quoting through ssh -> cmd -> powershell is finicky.
+# Remote helpers. The aggregator is a Pi 5 running Pi OS.
 #
-# Getting this wrong is not a loud failure: scp still succeeds, verification
-# comes back empty, the clip is never marked delivered, and the SAME clip is
-# re-shipped every timer run forever -- filling the aggregator with duplicates
-# while the node's encoded/ never drains.
+# Verification is what makes deleting the local copy safe, so it has to be able
+# to read the file back. If these ever return nothing the clip is never marked
+# delivered and the same clip re-ships every run -- the log says so below.
 
 # Single-quote a string for safe interpolation into a remote shell command.
 shq() { printf "'%s'" "${1//\'/\'\\\'\'}"; }
 
 remote_hash() {
-    case "$AGG_OS" in
-        windows)
-            ssh "${SSH_OPTS[@]}" "$AGG_HOST" \
-                "powershell -NoProfile -Command \"(Get-FileHash -Algorithm SHA256 -LiteralPath '$1').Hash\"" \
-                2>/dev/null | tr -d '\r\n' | tr '[:upper:]' '[:lower:]'
-            ;;
-        *)
-            ssh "${SSH_OPTS[@]}" "$AGG_HOST" \
-                "sha256sum -- $(shq "$1")" \
-                2>/dev/null | cut -d' ' -f1 | tr -d '\r\n' | tr '[:upper:]' '[:lower:]'
-            ;;
-    esac
+    ssh "${SSH_OPTS[@]}" "$AGG_HOST" "sha256sum -- $(shq "$1")" 2>/dev/null \
+        | cut -d' ' -f1 | tr -d '\r\n' | tr '[:upper:]' '[:lower:]'
 }
 
 remote_size() {
-    case "$AGG_OS" in
-        windows)
-            ssh "${SSH_OPTS[@]}" "$AGG_HOST" \
-                "powershell -NoProfile -Command \"(Get-Item -LiteralPath '$1').Length\"" \
-                2>/dev/null | tr -dc '0-9'
-            ;;
-        *)
-            ssh "${SSH_OPTS[@]}" "$AGG_HOST" \
-                "stat -c%s -- $(shq "$1")" \
-                2>/dev/null | tr -dc '0-9'
-            ;;
-    esac
+    ssh "${SSH_OPTS[@]}" "$AGG_HOST" "stat -c%s -- $(shq "$1")" 2>/dev/null \
+        | tr -dc '0-9'
 }
 
 remote_mkdir() {
-    case "$AGG_OS" in
-        windows)
-            ssh "${SSH_OPTS[@]}" "$AGG_HOST" \
-                "powershell -NoProfile -Command \"New-Item -ItemType Directory -Force -Path '$AGG_DIR' | Out-Null\"" \
-                >/dev/null 2>&1
-            ;;
-        *)
-            ssh "${SSH_OPTS[@]}" "$AGG_HOST" \
-                "mkdir -p -- $(shq "$AGG_DIR")" \
-                >/dev/null 2>&1
-            ;;
-    esac
+    ssh "${SSH_OPTS[@]}" "$AGG_HOST" "mkdir -p -- $(shq "$AGG_DIR")" \
+        >/dev/null 2>&1
 }
 
 if [[ "$SHIP_ENABLED" != "true" ]]; then
@@ -246,7 +207,6 @@ elif remote_mkdir; then
                 else log "size MISMATCH for $base (local=$lsz remote=$rsz)" \
                         "-- the copy on the aggregator is incomplete"; fi
                 ;;
-            none) ok=1 ;;
         esac
 
         if [[ "$ok" -eq 1 ]]; then
@@ -255,19 +215,17 @@ elif remote_mkdir; then
         else
             log "KEEPING local copy of $base -- will retry next run"
             if [[ "$blank" -eq 1 ]]; then
-                log "  The verify command returned nothing, which usually means"
-                log "  AGG_OS=\"$AGG_OS\" is wrong for this aggregator (a Pi 5"
-                log "  running Pi OS is \"linux\"). Until it matches, the copy"
-                log "  lands but cannot be read back, so this clip re-ships"
-                log "  every run. VERIFY_MODE=\"size\" is the fallback."
+                log "  The verify command returned nothing. The copy lands but"
+                log "  cannot be read back, so this clip re-ships every run."
+                log "  Check that the aggregator account can run sha256sum on"
+                log "  $AGG_DIR. VERIFY_MODE=\"size\" is the fallback."
             fi
         fi
     done
 else
     log "aggregator unreachable ($AGG_HOST:$AGG_PORT) -- clips held locally"
-    log "  Either the host is down, key auth is not set up, or AGG_OS=\"$AGG_OS\""
-    log "  is wrong: preparing the destination folder uses OS-specific commands,"
-    log "  so a Pi 5 aggregator configured as \"windows\" fails here too."
+    log "  Either the host is down, key auth is not set up, or the account"
+    log "  cannot create $AGG_DIR."
     log "  Check with:  ssh -p $AGG_PORT $AGG_HOST true"
 fi
 

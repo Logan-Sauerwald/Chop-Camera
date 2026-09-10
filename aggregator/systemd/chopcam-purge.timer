@@ -1,0 +1,13 @@
+[Unit]
+Description=Run chopcam clip retention periodically
+Documentation=file:/opt/chopcam-agg/README.md
+
+[Timer]
+OnBootSec=5min
+# Hourly is often enough for a retention window measured in days, and it means
+# the disk-pressure guard gets a look in well before anything fills up.
+OnUnitActiveSec=1h
+Persistent=true
+
+[Install]
+WantedBy=timers.target

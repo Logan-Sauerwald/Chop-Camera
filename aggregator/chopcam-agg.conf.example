@@ -39,5 +39,38 @@ WALL_HOST="0.0.0.0"
 # and the account the nodes ssh in as must be able to write here.
 INCOMING_DIR="/srv/chopcam/incoming"
 
-# Newest N clips listed on the wall and at /clips.
+# Newest N clips listed at /clips.
 CLIP_LIST_LIMIT="50"
+
+# --- retention --------------------------------------------------------------
+# How many days of clips to keep. THIS IS THE ONLY SETTING YOU NEED TO CHANGE
+# to keep footage for longer or shorter.
+#
+# The purge timer re-reads this file on every run, so editing the number takes
+# effect on the next pass -- no restart, no service to touch. Check what it
+# would do first, without deleting anything:
+#     python3 /opt/chopcam-agg/purge.py --dry-run
+#
+# Age is taken from the timestamp in each clip's filename, not the file's
+# mtime, so a node delivering a backlog after being offline does not reset the
+# clock on old footage.
+RETENTION_DAYS="7"
+
+# Emergency guard. If the filesystem reaches this percentage, oldest clips are
+# deleted first regardless of age, so a retention window that turns out to be
+# too long for the disk cannot fill it. Values below 50 are clamped up: a typo
+# here would otherwise empty the archive on a healthy disk.
+DISK_PCT_LIMIT="85"
+
+# --- playback ---------------------------------------------------------------
+# How much slower the "Download slow motion" button makes a clip. 4 turns
+# 120 fps into 30 fps, so it plays at quarter speed in any player with every
+# frame intact. The file is remuxed, never re-encoded.
+SLOWMO_FACTOR="4"
+
+# A chop that fired but has not arrived after this many minutes is shown as
+# "delayed" and the node counts as degraded. The node transcodes before
+# shipping, which takes minutes, so this needs headroom above that -- but it
+# is what surfaces a genuinely stuck pipeline instead of footage quietly never
+# appearing.
+STUCK_MINUTES="30"
