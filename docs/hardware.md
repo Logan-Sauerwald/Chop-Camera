@@ -18,20 +18,92 @@ ever moves back to central encoding).
 
 ### Supported modes (from `v4l2-ctl --list-formats-ext`)
 
-MJPEG:
+MJPEG — the full list, not just the ones in use:
 
 | Resolution | Max fps | Notes |
 |---|---|---|
-| 1920×1080 | **120** | cropped readout — narrower FOV, but the only 120 fps option |
-| 1280×720 | 120 | |
-| 2592×1944 | 30 | full sensor, wider FOV |
 | 3840×3040 | 20 | full sensor, widest |
+| 3840×2880 | 20 | |
+| 3840×2160 | 30 | |
+| 2592×1944 | 30 | full sensor, wider FOV |
+| 2048×1536 | 30 | |
+| 1600×1200 | 30 | |
+| **1920×1080** | **120** | in use — cropped readout, narrower FOV |
+| **1280×960** | **120** | 4:3 at full rate — see below |
+| 1280×720 | 120 | |
+| 1024×768 | 120 | |
+| 960×720 | 120 | |
+| 800×600 | 120 | |
+| 640×480 | 120 | |
+| 320×240 | 120 | |
 
 YUYV modes exist but are uncompressed and cap at ~5 fps at 1080p. Ignore them.
 
-**The high frame rates only exist on the cropped modes.** Wide field of view and
-120 fps are mutually exclusive on this camera. The current config chooses
-120 fps because slow-motion review of the chop is the point of the system.
+Every mode at 120 fps is a reduced readout, which is why the view is tight. The
+current config chooses 1920×1080 because slow-motion review of the chop is the
+point of the system.
+
+**`1280×960` is worth an experiment and has never been tried.** It is 4:3 at
+the same 120 fps. If it is a binned or scaled readout rather than a crop, it
+would give a noticeably *wider* view at full rate — which is the field-of-view
+problem, solved without a lens change. It is also 59% of the pixels, so roughly
+half the bitrate: smaller clips, less USB load, a ring buffer nearer 250 MB
+than 436.
+
+Testing it costs nothing: point the camera at a fixed scene and compare the
+framing of `1920x1080`, `1280x960` and `2592x1944`. If 1280×960 frames wider
+than 1080p, it is binned and you have gained field of view.
+
+### Camera controls, and why they decide whether 120 fps is real
+
+The module ships with **auto-exposure on** (Aperture Priority) and a default
+exposure of **15.6 ms**. At 120 fps a frame is **8.33 ms**, and exposure cannot
+exceed the frame period — so in anything short of good light the camera quietly
+drops to ~64 fps, and the frames it does deliver carry 15 ms of blade travel
+smeared across them. Both failures look like a working camera.
+
+Measured on the bench: with reasonable light, auto-exposure settled well inside
+the budget and the node captured a true **120.00 fps, 3600 frames, zero lost**.
+That is a property of the lighting, not of the camera — the same node in a dim
+machine guard will not hold it.
+
+`CAMERA_CONTROLS` in the node config pins the controls before ffmpeg opens the
+device, and again on every capture restart, because UVC controls do not reliably
+survive the device being reopened. They are applied one at a time and **in
+order**: `exposure_time_absolute` is inactive until `auto_exposure` is manual.
+
+A starting point for a lit chop point on 60 Hz mains:
+
+```
+CAMERA_CONTROLS="auto_exposure=1,exposure_time_absolute=40,focus_automatic_continuous=0,white_balance_automatic=0,backlight_compensation=0,power_line_frequency=2"
+```
+
+| Control | Value | Why |
+|---|---|---|
+| `auto_exposure` | `1` | manual (`3` is auto). Must come first |
+| `exposure_time_absolute` | `40` | units are 100 µs, so 4 ms. Must be under `83` to hold 120 fps |
+| `focus_automatic_continuous` | `0` | autofocus can hunt mid-chop on a fixed mount |
+| `white_balance_automatic` | `0` | keeps colour consistent across nodes and over time |
+| `backlight_compensation` | `0` | it works by *lengthening* exposure |
+| `power_line_frequency` | `2` | 60 Hz. The camera defaults to 50, which bands under North American lighting |
+
+Shorter exposure is sharper but darker — **add light rather than lengthening
+it.** This is a per-install setting because it depends on the light at that
+camera.
+
+Two related notes:
+
+- **60 Hz mains gives LED lighting a 120 Hz flicker**, which beats directly
+  against a 120 fps capture. If clips show pulsing brightness, that is the
+  lighting, not the camera — it wants DC-driven or high-frequency fixtures.
+- `power_line_frequency=0` disables anti-flicker entirely. Worth trying if the
+  filter appears to be constraining exposure.
+
+List what a given camera supports with:
+
+```bash
+v4l2-ctl -d /dev/video0 --list-ctrls
+```
 
 ### Lens
 

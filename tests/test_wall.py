@@ -139,6 +139,32 @@ class TestClipAttribution(unittest.TestCase):
         self._touch("event_20260910_193012Z_line9-uw1.mp4")
         self.assertEqual(wall.clips_by_node()["uw1"]["count"], 0)
 
+    def test_newest_is_by_recorded_time_not_delivery_time(self):
+        # A node that was offline delivers its backlog in one burst: every
+        # mtime lands in the same second, so ordering by mtime is arbitrary.
+        # "Last chop" must still be the most recently RECORDED clip.
+        self._touch("event_20260910_080000Z_line3-uw1.mp4")   # oldest chop
+        self._touch("event_20260910_200000Z_line3-uw1.mp4")   # newest chop
+        self._touch("event_20260910_120000Z_line3-uw1.mp4")   # middle
+        newest = wall.newest_clip_for("uw1")
+        self.assertEqual(newest["file"], "event_20260910_200000Z_line3-uw1.mp4")
+        self.assertEqual([c["file"] for c in wall.list_clips()][0],
+                         "event_20260910_200000Z_line3-uw1.mp4")
+
+    def test_a_delivered_clip_is_not_reported_as_still_processing(self):
+        # The bug this guards: with the newest clip picked wrongly, a node
+        # whose chop had already arrived showed "Chop processing" forever.
+        from datetime import datetime, timedelta, timezone
+        now = datetime.now(timezone.utc)
+        recent = now - timedelta(minutes=4)
+        self._touch(f"event_{recent:%Y%m%d_%H%M%S}Z_line3-uw1.mp4")
+        self._touch("event_20260101_010000Z_line3-uw1.mp4")     # much older
+        health = {"triggers": {"last_utc":
+                               (now - timedelta(minutes=5)).isoformat(timespec="seconds")},
+                  "clips": {"awaiting_transcode": 0, "awaiting_ship": 0}}
+        state = wall.pending_state(health, wall.newest_clip_for("uw1"))
+        self.assertEqual(state["state"], "none", state)
+
     def test_listing_is_newest_first(self):
         import time
         self._touch("event_20260910_193012Z_line3-uw1.mp4")

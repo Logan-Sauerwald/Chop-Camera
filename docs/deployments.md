@@ -107,5 +107,5 @@ delivered clips cannot be matched to the tiles that recorded them.
 |---|---|---|---|
 | | | | |
 
-Each node at that install sets `AGG_IP` to the aggregator, `AGG_DIR` to the
-same path as `INCOMING_DIR`, and `AGG_OS="linux"` (the aggregator is a Pi 5).
+Each node at that install sets `AGG_IP` to the aggregator and `AGG_DIR` to the
+same path as `INCOMING_DIR`.

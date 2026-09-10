@@ -211,8 +211,17 @@ def list_clips(limit=None):
                 "recorded_utc": when.isoformat(timespec="seconds") if when else None,
                 "mb": round(st.st_size / (1024 * 1024), 1),
                 "received": st.st_mtime,
+                # Sort key: when the chop HAPPENED, not when the file landed.
+                # A node that was offline delivers a backlog in one burst, so
+                # every mtime is within the same second and their order is
+                # whatever the filesystem hands back -- which made "last chop"
+                # able to pick a clip hours older than the newest one.
+                # Falls back to mtime for a name that will not parse.
+                # An epoch float, not the ISO string, so clips written with a
+                # local-time offset still order correctly against UTC ones.
+                "_order": when.timestamp() if when else st.st_mtime,
             })
-    out.sort(key=lambda c: c["received"], reverse=True)
+    out.sort(key=lambda c: c["_order"], reverse=True)
     return out[:limit] if limit else out
 
 
@@ -417,6 +426,11 @@ _PAGE = """<!doctype html>
               text-transform:uppercase; color:#9aa4b2; font-weight:600; }
   #summary { font-variant-numeric:tabular-nums; color:#9aa4b2; }
   #summary b { color:#e8ecf1; }
+  /* Columns and rows are set by layout() from the camera count so the tiles
+     fill the monitor: 3 cameras go 2-over-1, 5 go 3-over-2, and so on. The
+     auto-fit here is only what applies before that runs. Tiles span 2 of a
+     doubled column track, which is what lets a short last row sit centred
+     instead of hugging the left edge with a hole in the corner. */
   .grid { flex:1 1 auto; min-height:0; display:grid; gap:8px; padding:8px;
           grid-template-columns:repeat(auto-fit,minmax(360px,1fr));
           grid-auto-rows:1fr; }
@@ -571,12 +585,48 @@ function updateChopButton(btn, n) {
   btn.disabled = !n.last_clip_file;
 }
 
+// Fill the screen rather than leaving a ragged row: square-ish grid, then
+// centre whatever is left over on the last row.
+//   1 -> 1      2 -> 2x1    3 -> 2 over 1
+//   4 -> 2x2    5 -> 3 over 2    6 -> 3x2    7-9 -> 3x3 ...
+// Narrow windows fall back to as many columns as actually fit, so the wall
+// stays usable on a laptop or phone instead of producing unreadable slivers.
+const MIN_TILE_PX = 360;
+
+function layout(n) {
+  const grid = document.getElementById('grid');
+  if (!n) return;
+  const width = grid.clientWidth || window.innerWidth;
+  const ideal = Math.ceil(Math.sqrt(n));
+  const fits = Math.max(1, Math.floor(width / MIN_TILE_PX));
+  const cols = Math.max(1, Math.min(ideal, fits, n));
+  const rows = Math.ceil(n / cols);
+
+  grid.style.gridTemplateColumns = 'repeat(' + (cols * 2) + ', 1fr)';
+  grid.style.gridTemplateRows = 'repeat(' + rows + ', 1fr)';
+
+  const tiles = grid.querySelectorAll('.tile');
+  tiles.forEach(t => {
+    t.style.gridColumnStart = 'auto';
+    t.style.gridColumnEnd = 'span 2';
+  });
+
+  // A last row with fewer tiles than columns starts half a tile in, which the
+  // doubled tracks make an exact offset rather than an approximation.
+  const leftover = n - (rows - 1) * cols;
+  if (leftover > 0 && leftover < cols && tiles[n - leftover]) {
+    tiles[n - leftover].style.gridColumnStart = String(cols - leftover + 1);
+  }
+}
+
 function render(s) {
   const grid = document.getElementById('grid');
   document.getElementById('empty').hidden = s.nodes.length > 0;
   if (!built) {
     s.nodes.forEach(n => grid.appendChild(tile(n)));
     built = true;
+    layout(s.nodes.length);
+    window.addEventListener('resize', () => layout(s.nodes.length));
   }
   s.nodes.forEach(n => { nodes[n.name] = n; });
 
@@ -822,8 +872,9 @@ class WallHandler(BaseHTTPRequestHandler):
         elif path == "/status":
             self._json(aggregate_status())
         elif path == "/clips":
-            self._json({"incoming_dir": INCOMING_DIR,
-                        "clips": list_clips(CLIP_LIST_LIMIT)})
+            clips = [{k: v for k, v in c.items() if not k.startswith("_")}
+                     for c in list_clips(CLIP_LIST_LIMIT)]
+            self._json({"incoming_dir": INCOMING_DIR, "clips": clips})
         elif path == "/healthz":
             status = aggregate_status()
             writable = os.path.isdir(INCOMING_DIR) and os.access(INCOMING_DIR, os.W_OK)

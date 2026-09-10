@@ -178,8 +178,9 @@ the fraction was never buying accuracy. A 0.1 % speed error over a 30 s clip is
 0.03 s and irrelevant to chop review. The measured rate is kept in the clip
 metadata (`measured_fps=`) and in the journal line for anyone who needs it.
 
-This also makes `PLAYBACK_MODE="slowmo"` exact: `setpts=4.0*PTS -r 30` against
-a true 120 fps input is a clean 4×.
+Clips are always written at true speed with every frame. Slow motion is a
+viewing choice made on the way out — see "Playback, and why 0.25x is the
+default".
 
 ### The PLC edge detector is seeded from the current value
 
@@ -329,22 +330,23 @@ nodes send no CORS headers, so the browser cannot read their `/healthz`
 directly. MJPEG `<img>` tags are not CORS-restricted, so video still comes
 straight from the nodes.
 
-### AGG_OS has a silent failure mode
+### Shipping verifies by content, and says which way it failed
 
-The aggregator is a Pi 5, so `AGG_OS="linux"`. Set it to `windows` against a
-Linux aggregator and nothing errors: `scp` succeeds, the PowerShell verify
-command produces nothing, the clip is never marked delivered, and the **same
-clip re-ships every timer run forever** — duplicates accumulating on the
-aggregator while the node's `encoded/` never drains.
+The aggregator is a Pi 5, so the remote helpers are plain `sha256sum` /
+`stat -c%s` / `mkdir -p`. There is no Windows variant any more.
 
-`postprocess.sh` now distinguishes the two signatures. A verify that returns
-*nothing* names `AGG_OS`; a verify that returns a *different* value is real
-corruption and says so instead. Both were the same message before, which meant
-a wrong `AGG_OS` looked like a bad network.
+The failure that matters is quiet: `scp` succeeds, the verify command produces
+nothing, the clip is never marked delivered, and the SAME clip re-ships every
+timer run — duplicates piling up on the aggregator while the node's `encoded/`
+never drains. `postprocess.sh` therefore distinguishes two signatures. A verify
+returning *nothing* is a broken remote command and says so; a verify returning a
+*different* value is real corruption and says that instead. They used to be one
+message, which made a broken command look like a bad network.
 
-The ship path has been run end to end against a real Linux target — transcode,
-scp, SHA-256 verify, move to `sent/` — including a destination path containing
-a space, and a simulated truncated delivery, which was correctly refused.
+The path has been run end to end against a real Linux target — transcode, scp,
+SHA-256 verify, move to `sent/` — including a destination path containing a
+space, and a simulated truncated delivery (scp exits 0, far end short), which
+was correctly refused with the local copy kept.
 
 ### Camera controls are a per-install setting
 
@@ -397,10 +399,9 @@ restamped to 30 fps with every frame intact. Measured: 600 frames in, 600
 frames out, 5.00 s becomes 19.98 s, **0.08 s to produce**, same file size.
 
 This matters because the Pi 5 has no H.264 *encoder* either -- re-encoding on
-demand would be hopeless, but a container rewrite is free. It also replaced
-`PLAYBACK_MODE="slowmo"` on the node, which used to bake the decision into the
-archive at encode time. Clips are now always stored at true speed, and slow
-motion is a viewing choice made on the way out.
+demand would be hopeless, but a container rewrite is free. It also replaced `PLAYBACK_MODE="slowmo"`, which used to bake the decision into
+the archive at encode time. Clips are now always stored at true speed, and slow
+motion is chosen on the way out — reversible, and the archive stays honest.
 
 ### Range requests are what make the player work
 
@@ -539,43 +540,65 @@ Options that were considered and rejected:
 
 ## Open items, roughly in order
 
-1. **Verify the PLC trigger against real hardware.** Neither driver has been
-   run against a live PLC. Start with `capture.py --check-config`, then
-   `capture.py --test-trigger 60`, which connects, names the CPU it reached,
-   and reports every transition plus a verdict on whether the pulses are wide
-   enough to catch. Non-zero exit means marginal or absent.
-   - *ControlLogix:* run `--list-tags 156N0` first; the real tag may be
-     `...:O.Data.7` or an alias. If connect times out but ping works, the PLC
-     is in a chassis and `PLC_PATH` needs the CPU slot (`"10.2.4.1/1"`).
-     Watch for the `reads as DINT, not BOOL` warning — that means the tag is a
-     word and the trigger is really testing "nonzero".
-   - *Siemens:* check rack/slot, PUT/GET permission, and that the DB is not
-     "optimized" — see the PLC section above.
-2. **Confirm the trigger fires once per chop**, and that the chop lands near
-   the middle of the clip. `--test-trigger` now measures this directly: it
-   prints the width of every pulse and the poll rate it actually achieved, and
-   judges the margin against the achieved rate rather than the configured one
-   (a PLC that answers in 50 ms makes `POLL_HZ=30` a 20 Hz poll). If a fast
-   chop is missed, the pulse was shorter than the real poll interval — raise
-   `POLL_HZ` or have controls latch the bit.
-3. **Test the transfer against the real aggregator.** The Linux path has been
-   run end to end (transcode → scp → SHA-256 verify → `sent/`), including a
-   truncated delivery, which was refused. What is untested is *this plant's*
-   aggregator: key auth, the account, and that `AGG_DIR` matches
-   `INCOMING_DIR`. Confirm `ssh -o BatchMode=yes <agg> true` returns without a
-   prompt before enabling `SHIP_ENABLED`.
-4. **Run the aggregator on real hardware.** Pi 5 + NVMe. The wall, node status
-   and clip listing are built (`aggregator/`) and verified against simulated
-   nodes in all three states, but not on a real Pi 5 with real cameras. Drop
-   `LIVE_FPS` to 5–8 per node first. Still missing: clip retention and
-   playback.
-5. **Storage.** ~7 GB/day across five nodes at one chop/hour. A 1 TB SSD holds
-   ~5 months. Use an SSD, not an SD card — SD cards wear out under continuous
-   writes and fail in ways that lose data.
-6. **Decide `PLAYBACK_MODE`.** `realtime` keeps true 120 fps (scrub to
-   inspect); `slowmo` retimes to 30 fps so the clip *plays* at 4× slow motion in
-   any player. If reviewers will just double-click the file, `slowmo` is
-   probably what they want.
+Everything below needs the plant. The node pipeline itself — capture, ring
+buffer, trigger, mux, transcode — has been run end to end on real hardware:
+3600 frames captured at a measured 120.00 fps, 3600 packets out the far side,
+duration exactly 30.000000, zero frames lost.
+
+1. **Verify the PLC trigger against real hardware.** Neither driver has been run
+   against a live PLC. `capture.py --check-config`, then
+   `capture.py --test-trigger 60` (or `0` to watch until Ctrl-C, if you cannot
+   force a splice). It connects, names the CPU it reached, reports every
+   transition, and gives a verdict on whether the pulses are wide enough to
+   catch. Non-zero exit means marginal or absent.
+   - *Siemens:* rack/slot first — connection refused is almost always the wrong
+     slot. Then PUT/GET permission. Merkers (`M158.7`) do **not** need the
+     "optimized block access" change; that is data blocks only.
+   - *ControlLogix:* `--list-tags` first; the real tag may be `...:O.Data.7` or
+     an alias. Watch for `reads as DINT, not BOOL` — that means the trigger is
+     testing "nonzero" rather than one bit.
+
+2. **Confirm the trigger fires once per chop**, and that the chop lands near the
+   middle of the clip. `--test-trigger` measures pulse width and the poll rate
+   actually achieved, judging the margin against the achieved rate rather than
+   the configured one. If the bit is a single PLC scan (~10 ms), no poll rate
+   saves you — controls need to latch it for ~250 ms.
+
+   Also worth establishing: does the bit go true when the knife *fires*, or when
+   the splice *sequence begins*? If the sequence starts seconds before the cut,
+   the chop lands late in the clip and `PRE_SECONDS`/`POST_SECONDS` want
+   shifting.
+
+3. **Tune the camera at the knife.** `measured` in the `saved` line is the
+   number: a bench reading of 120.00 is a property of bench lighting, not of the
+   camera. If it drops at the machine, auto-exposure is stretching the shutter
+   past the 8.33 ms a 120 fps frame allows — pin `CAMERA_CONTROLS` and add
+   light.
+
+4. **Test shipping against this plant's aggregator.** The Linux path works end
+   to end here; what is untested is key auth, the account, and that `AGG_DIR`
+   matches `INCOMING_DIR`. `ssh -o BatchMode=yes <agg> true` must return without
+   a prompt before enabling `SHIP_ENABLED`.
+
+5. **Run the aggregator on real hardware.** Pi 5 + NVMe. The wall, playback,
+   status and retention are built and verified against simulated nodes in every
+   state, but not on a real Pi 5 with real cameras. Drop `LIVE_FPS` to 5–8 per
+   node first.
+
+   The one thing that could not be checked here: **H.264 decode in the
+   browser.** Playwright's Chromium ships without proprietary codecs, so
+   playback was proven with VP9 through the same code path. Pi OS's
+   `chromium-browser` includes H.264 — open a clip on the real machine and
+   confirm it plays.
+
+6. **Measure the real chop rate**, which is what sizes storage. "One chop an
+   hour" was always an assumption. At ~60 MB a clip and 7-day retention, four
+   nodes is ~40 GB at one an hour and ~240 GB at one every ten minutes. The
+   disk-pressure guard means a wrong guess cannot fill the disk, but it decides
+   what drive to buy.
+
+7. **Browsing older clips.** The wall plays the *latest* chop per camera;
+   `/clips` lists everything but there is no UI for picking an older one.
 
 ## Running the tests
 
