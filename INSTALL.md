@@ -257,7 +257,7 @@ Then follow it through:
 
 ```bash
 sudo systemctl start chopcam-postprocess.service   # force a run now
-journalctl -u chopcam-post -n 30
+journalctl -u chopcam-postprocess -n 30
 ```
 
 Copy a clip off by hand:
@@ -314,7 +314,8 @@ ssh -o BatchMode=yes <agg-user>@<agg-ip> "powershell -NoProfile -Command \"echo 
 |---|---|
 | `camera stream ended` on a loop | something else holds the camera (`sudo fuser -v /dev/video0`), or the resolution/fps isn't supported |
 | `Device or resource busy` | a stray ffmpeg or `guvcview`; `pkill ffmpeg` |
-| Service fails instantly, no journal entries | bad `ExecStart` path or the script isn't executable — check `systemctl status`, not `journalctl -u chopcam-post` |
+| Service fails instantly, no journal entries | bad `ExecStart` path or the script isn't executable — check `systemctl status`, not `journalctl` |
+| `journalctl -u chopcam-post` shows nothing | wrong name — the unit is `chopcam-postprocess`. `chopcam-post` is only the log tag, so use `journalctl -t chopcam-post` if you want to match on that |
 | `/usr/bin/env: 'bash\r'` | CRLF line endings; `dos2unix src/postprocess.sh` |
 | PLC `No route to host` | PLC not reachable — normal if it isn't plugged in |
 | ControlLogix connects but times out, ping works | chassis slot missing: `PLC_PATH="10.2.4.1/1"` |

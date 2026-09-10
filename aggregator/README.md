@@ -144,7 +144,7 @@ where it is rather than looking broken while you wait.
 
 **"Chop delayed" is a fault, not a slow day.** It means a trigger fired and the
 clip never arrived — a wedged transcode, a full disk, broken key auth. Nothing
-else in the system notices that; check `journalctl -u chopcam-post` on that
+else in the system notices that; check `journalctl -u chopcam-postprocess` on that
 node.
 
 ## From a laptop
