@@ -26,7 +26,8 @@ Adding or removing a camera is one entry in `NODES` and a restart. Nothing else
 changes.
 
 > The shots below use simulated nodes and test patterns in place of real
-> cameras. All are 1920×1080.
+> cameras. The wall shots are 1920×1080; the player shots 1600×900. Every
+> control and label is the real page — only the footage is synthetic.
 
 ---
 
@@ -93,6 +94,75 @@ At this scale the constraint is decode, not connections: sixteen MJPEG streams
 is a lot of JPEG for a Pi 5 to unpack. That is what `LIVE_FPS` on each node is
 for — 5–8 fps per node keeps the wall comfortable. It is not something five
 cameras will run into.
+
+## Watching a chop
+
+Every tile carries a button showing that camera's most recent clip and its age.
+Click it and the clip fills the screen, playing at **0.25x**.
+
+![The clip player, playing at quarter speed](images/player-01-playing.jpg)
+
+Top left is the node and when the chop was recorded, in UTC, with its age.
+Along the bottom:
+
+| Control | Does |
+|---|---|
+| **Pause** / **Play** | toggles; the spacebar does the same |
+| **0.1x / 0.25x / 0.5x / 1x** | playback speed; 0.25x is where it opens |
+| **Download slow motion** | a 4x slow copy that plays slowly in *any* player |
+| **Original speed** | the true-speed file |
+| **Back to live** (or Esc) | returns to the wall |
+
+Pausing brings up the browser's own controls underneath, with the scrub bar and
+the clip length — a 30 s chop, which takes two minutes to watch at quarter
+speed:
+
+![The clip player paused, with the scrub bar visible](images/player-02-paused.jpg)
+
+There is an always-visible **Pause** button of our own because the browser's
+controls fade out after a few seconds, and the monitor may have nothing to move
+a pointer with.
+
+### Why it opens at 0.25x
+
+**On a 60 Hz monitor a 120 fps clip played at 1x can only show 60 of every 120
+frames.** Half of what the camera captured is discarded at the display, no
+matter how fast the machine is. At 0.25x the clip presents 30 frames a second,
+comfortably under the refresh rate, so every captured frame is actually
+displayed. Slow motion is not a convenience here — it is the only way to see
+what the 120 fps capture bought.
+
+It suits the hardware too. The Pi 5 has no hardware H.264 decoder, so clips are
+software-decoded; at 0.25x the browser decodes about 30 frames a second rather
+than 120. Real-time 1x is the marginal case, and the least useful one.
+
+Opening the player tears down the live MJPEG streams and restores them on exit.
+That is deliberate: each tile holds an open connection and keeps decoding, and
+leaving several running while the Pi software-decodes a 120 fps clip is what
+makes playback stutter.
+
+### The download is a remux, not a re-encode
+
+"Download slow motion" rescales the clip's timestamps — 120 fps restamped to
+30 — so every frame survives and the file plays at quarter speed in anything,
+including someone double-clicking it in Windows. Measured: 600 frames in, 600
+out, 5.00 s becomes 19.98 s, in 0.08 s, same file size.
+
+That matters because the Pi 5 has no H.264 *encoder* either. Re-encoding on
+demand would be hopeless; a container rewrite is free. Clips are therefore
+always stored at true speed, and slow motion is chosen on the way out.
+
+### Reviewing carefully
+
+A laptop on the same switch opens the same page at
+`http://<aggregator>:8090/`, and is the better place to study a chop — it has
+hardware H.264 decode, which the Pi 5 does not, so 1x playback and heavy
+seeking behave properly.
+
+For frame-by-frame work, download the clip and open it in **mpv**: `,` and `.`
+step exactly one frame back and forward. VLC's `E` steps only *forward*, with no
+reliable way back, which is maddening when you are hunting the exact frame of
+contact.
 
 ## A note on tile shape
 
