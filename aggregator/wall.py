@@ -426,6 +426,11 @@ _PAGE = """<!doctype html>
               text-transform:uppercase; color:#9aa4b2; font-weight:600; }
   #summary { font-variant-numeric:tabular-nums; color:#9aa4b2; }
   #summary b { color:#e8ecf1; }
+  /* Columns and rows are set by layout() from the camera count so the tiles
+     fill the monitor: 3 cameras go 2-over-1, 5 go 3-over-2, and so on. The
+     auto-fit here is only what applies before that runs. Tiles span 2 of a
+     doubled column track, which is what lets a short last row sit centred
+     instead of hugging the left edge with a hole in the corner. */
   .grid { flex:1 1 auto; min-height:0; display:grid; gap:8px; padding:8px;
           grid-template-columns:repeat(auto-fit,minmax(360px,1fr));
           grid-auto-rows:1fr; }
@@ -580,12 +585,48 @@ function updateChopButton(btn, n) {
   btn.disabled = !n.last_clip_file;
 }
 
+// Fill the screen rather than leaving a ragged row: square-ish grid, then
+// centre whatever is left over on the last row.
+//   1 -> 1      2 -> 2x1    3 -> 2 over 1
+//   4 -> 2x2    5 -> 3 over 2    6 -> 3x2    7-9 -> 3x3 ...
+// Narrow windows fall back to as many columns as actually fit, so the wall
+// stays usable on a laptop or phone instead of producing unreadable slivers.
+const MIN_TILE_PX = 360;
+
+function layout(n) {
+  const grid = document.getElementById('grid');
+  if (!n) return;
+  const width = grid.clientWidth || window.innerWidth;
+  const ideal = Math.ceil(Math.sqrt(n));
+  const fits = Math.max(1, Math.floor(width / MIN_TILE_PX));
+  const cols = Math.max(1, Math.min(ideal, fits, n));
+  const rows = Math.ceil(n / cols);
+
+  grid.style.gridTemplateColumns = 'repeat(' + (cols * 2) + ', 1fr)';
+  grid.style.gridTemplateRows = 'repeat(' + rows + ', 1fr)';
+
+  const tiles = grid.querySelectorAll('.tile');
+  tiles.forEach(t => {
+    t.style.gridColumnStart = 'auto';
+    t.style.gridColumnEnd = 'span 2';
+  });
+
+  // A last row with fewer tiles than columns starts half a tile in, which the
+  // doubled tracks make an exact offset rather than an approximation.
+  const leftover = n - (rows - 1) * cols;
+  if (leftover > 0 && leftover < cols && tiles[n - leftover]) {
+    tiles[n - leftover].style.gridColumnStart = String(cols - leftover + 1);
+  }
+}
+
 function render(s) {
   const grid = document.getElementById('grid');
   document.getElementById('empty').hidden = s.nodes.length > 0;
   if (!built) {
     s.nodes.forEach(n => grid.appendChild(tile(n)));
     built = true;
+    layout(s.nodes.length);
+    window.addEventListener('resize', () => layout(s.nodes.length));
   }
   s.nodes.forEach(n => { nodes[n.name] = n; });
 
