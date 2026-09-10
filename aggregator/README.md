@@ -62,7 +62,6 @@ Append each node's public key to the aggregator's
 
 ```
 SHIP_ENABLED="true"
-AGG_OS="linux"                    # a Pi 5 aggregator is "linux"
 AGG_USER="<aggregator account>"
 AGG_IP="<aggregator address>"
 AGG_DIR="/srv/chopcam/incoming"   # must match INCOMING_DIR here
@@ -76,11 +75,13 @@ ssh -o BatchMode=yes <agg-user>@<agg-ip> true && echo ok
 
 If that prompts, the timer job fails silently every five minutes.
 
-**`AGG_OS` must match this machine.** Set to `windows` against a Linux
-aggregator, the upload still succeeds but verification returns nothing, so the
-clip is never marked delivered and the *same clip re-ships every timer run
-forever* — duplicates piling up here while the node's `encoded/` never drains.
-`postprocess.sh` names `AGG_OS` in its log when it sees that signature.
+**Verification has to be able to read the file back.** If it cannot, the upload
+still succeeds but the clip is never marked delivered, and the *same clip
+re-ships every timer run* — duplicates piling up here while the node's
+`encoded/` never drains. `postprocess.sh` distinguishes the two signatures: a
+verify returning *nothing* means the remote command is broken (check the
+account can run `sha256sum` on `INCOMING_DIR`), while a verify returning a
+*different* value is real corruption.
 
 ## Endpoints
 

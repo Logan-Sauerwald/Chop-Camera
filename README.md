@@ -21,10 +21,12 @@ H.264 and collected on an aggregator for review in slow motion.
 | Config validation + unit tests | **working** |
 | PLC trigger — ControlLogix (EtherNet/IP) | **written, never tested against a real PLC** |
 | PLC trigger — Siemens S7 (ISO-on-TCP) | **written, never tested against a real PLC** |
+| Camera exposure tuning at a real chop point | **not done** |
 | Transfer to aggregator (Linux) | **tested end to end, not on real hardware** |
 | Aggregator — live wall + node status | **built, not run on real hardware** |
 | Aggregator — last-chop playback + slow motion | **built, not run on real hardware** |
 | Aggregator — clip retention (auto-delete) | **built, not run on real hardware** |
+| Node pipeline on real hardware | **verified — 3600 frames at 120.00 fps, zero lost** |
 | Nodes 2–5 | **not purchased** |
 
 Read `HANDOFF.md` before changing anything. It records what was measured, what
@@ -93,7 +95,9 @@ src/postprocess.sh     transcode, ship, purge
 systemd/               service + timer units
 aggregator/            the aggregator half — wall, node status, clip landing
 tests/                 unit tests — run with no PLC and no camera attached
-docs/hardware.md       parts, measurements, camera and lens notes
+docs/hardware.md       parts, measurements, camera modes, exposure tuning
+docs/deployments.md    per-machine node tables — what each node talks to
+docs/wall-layouts.md   how the wall arranges 1..16 cameras, with screenshots
 HANDOFF.md             design reasoning and open items — read this
 INSTALL.md             step-by-step deployment
 ```
