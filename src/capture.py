@@ -178,6 +178,11 @@ LIVE_FPS  = max(1, _i("LIVE_FPS", 15))
 PRE_SECONDS  = max(1, _i("PRE_SECONDS", 15))
 POST_SECONDS = max(1, _i("POST_SECONDS", 15))
 
+SHIP_ENABLED = _b("SHIP_ENABLED", False)
+AGG_USER     = _s("AGG_USER", "")
+AGG_IP       = _s("AGG_IP", "")
+AGG_DIR      = _s("AGG_DIR", "")
+
 STATE_DIR  = _s("STATE_DIR", "/var/lib/chopcam")
 OUTPUT_DIR = os.path.join(STATE_DIR, "raw")
 ENCODE     = _s("CAPTURE_ENCODE", "mjpeg")
@@ -312,6 +317,8 @@ _status = {
     "plc_reads": 0,
     "plc_errors": 0,
     "plc_poll_hz": 0.0,
+    "modbus_state": "disabled",
+    "modbus_detail": "",
     "trigger_count": 0,
     "trigger_last_utc": None,
     "trigger_last_source": None,
@@ -347,6 +354,10 @@ def fire_trigger(source):
 # Config validation -- fail fast and loudly, before the camera is even opened.
 # ---------------------------------------------------------------------------
 _NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
+# Addresses that appear in the shipped documentation. Finding one in a live
+# config usually means it was copied and not edited.
+_PLACEHOLDER_HOSTS = {"10.2.4.1", "192.168.0.1", "127.0.0.1"}
 
 
 def validate_config():
@@ -387,6 +398,19 @@ def validate_config():
             problems.append(f"PLC config: {exc}")
         except ImportError as exc:                    # pragma: no cover
             problems.append(f"PLC driver import failed: {exc}")
+
+    if SHIP_ENABLED:
+        # Shipping to the wrong host is worse than not shipping: the node
+        # deletes its local copy once delivery verifies, so a half-configured
+        # target is a way to lose footage.
+        for key, val in (("AGG_USER", AGG_USER), ("AGG_IP", AGG_IP),
+                         ("AGG_DIR", AGG_DIR)):
+            if not val:
+                problems.append(
+                    f"SHIP_ENABLED is true but {key} is not set. Set the "
+                    f"aggregator account, address and destination folder for "
+                    f"THIS machine's setup -- they differ between installs."
+                )
 
     if not PLC_TRIGGER and not MODBUS_TEST_TRIGGER:
         problems.append(
@@ -436,6 +460,26 @@ def config_warnings():
             f"{int(budget / 1048576 / 0.6)}M, or shorten "
             f"PRE_SECONDS/POST_SECONDS."
         )
+    # Every install is on a different machine with its own subnet, so an
+    # address carried over from another node's config is the likeliest way to
+    # end up pointing at a PLC that exists but is not this chop point's.
+    if PLC_TRIGGER and PLC_PATH:
+        host = str(PLC_PATH).split("/")[0]
+        if host in _PLACEHOLDER_HOSTS:
+            warnings.append(
+                f"PLC_PATH={PLC_PATH!r} is the address from the shipped "
+                f"example, not necessarily this machine's PLC. Confirm it "
+                f"with:  capture.py --test-trigger"
+            )
+    if MODBUS_TEST_TRIGGER and MODBUS_PORT < 1024:
+        warnings.append(
+            f"MODBUS_PORT={MODBUS_PORT} is privileged (below 1024). The "
+            "service runs as a normal user, so binding needs "
+            "'AmbientCapabilities=CAP_NET_BIND_SERVICE' in chopcam.service "
+            "(there is a commented line for it). Use 502 only if the PLC "
+            "pushes the trigger to this Pi."
+        )
+
     expected = BUFFER_SECONDS * 14.75      # measured 118 Mbps peak
     if BUFFER_MAX_MB < expected:
         warnings.append(
@@ -783,6 +827,84 @@ def build_modbus_context():
     return ModbusServerContext(slaves=slave, single=True)
 
 
+def modbus_preflight():
+    """Return None if the Modbus address is bindable, else why it is not.
+
+    pymodbus does NOT fail loudly here: on a bind error it logs one warning and
+    then prints "Server listening.", so a dead trigger looks like a live one.
+    Binding it ourselves first turns that into an answer we can report.
+    """
+    import socket
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        # Deliberately no SO_REUSEADDR: we want a genuine conflict to show up.
+        sock.bind((MODBUS_BIND_IP, MODBUS_PORT))
+        return None
+    except PermissionError:
+        return (f"port {MODBUS_PORT} is privileged (below 1024) and this "
+                f"service does not run as root. Either add "
+                f"'AmbientCapabilities=CAP_NET_BIND_SERVICE' to "
+                f"chopcam.service (see the commented line there), or use a "
+                f"port above 1024.")
+    except OSError as exc:
+        return f"cannot bind {MODBUS_BIND_IP}:{MODBUS_PORT} -- {exc}"
+    finally:
+        sock.close()
+
+
+async def _idle():
+    while not _stop.is_set():
+        await asyncio.sleep(1)
+
+
+async def serve_modbus():
+    """Run the Modbus server, but never let its failure stop capture.
+
+    Capture is the part that must not fail. A busy port, a missing pymodbus or
+    a server that dies later are all reasons to lose the Modbus trigger, and
+    none of them is a reason to lose the recording.
+    """
+    def fail(detail, hint=""):
+        log.error("modbus trigger DISABLED: %s", detail)
+        if hint:
+            log.error("  %s", hint)
+        if not PLC_TRIGGER:
+            log.error("  This is the ONLY trigger configured -- nothing can "
+                      "start a recording until it is fixed.")
+        set_status(modbus_state="error", modbus_detail=str(detail)[:200])
+
+    problem = modbus_preflight()
+    if problem:
+        fail(problem)
+        await _idle()
+        return
+
+    try:
+        from pymodbus.server import StartAsyncTcpServer
+    except ImportError as exc:
+        fail(f"pymodbus is not installed ({exc})",
+             "Fix: pip install 'pymodbus>=3.8,<3.9'  "
+             "(3.9+ rewrote the datastore and the callback-datablock pattern "
+             "this trigger uses no longer works there)")
+        await _idle()
+        return
+
+    try:
+        context = build_modbus_context()
+        log.info("modbus trigger listening on %s:%d "
+                 "(coil PDU %d -- a PLC writing \"coil 00001\" means PDU 0)",
+                 MODBUS_BIND_IP, MODBUS_PORT, MODBUS_TRIGGER_PDU)
+        set_status(modbus_state="listening",
+                   modbus_detail=f"{MODBUS_BIND_IP}:{MODBUS_PORT} "
+                                 f"PDU {MODBUS_TRIGGER_PDU}")
+        await StartAsyncTcpServer(context, address=(MODBUS_BIND_IP, MODBUS_PORT))
+        fail("modbus server exited")
+    except Exception as exc:                          # noqa: BLE001
+        fail(f"modbus server error: {exc}")
+    await _idle()
+
+
 # ---------------------------------------------------------------------------
 # Live preview: MJPEG-over-HTTP, served from frames already in the buffer.
 # Never opens the camera a second time, so it cannot cause a
@@ -828,6 +950,11 @@ def health_snapshot():
     # Two seconds without a frame at 120 fps means the camera is gone, not slow.
     camera_ok = frame_age is not None and frame_age < 2.0
     plc_ok = (not PLC_TRIGGER) or st["plc_state"] == "connected"
+    modbus_ok = (not MODBUS_TEST_TRIGGER) or st["modbus_state"] == "listening"
+    # Whichever trigger this node actually relies on has to be working. With
+    # the PLC polled, Modbus is a bench aid and its failure is only a warning;
+    # with PLC_TRIGGER off, Modbus is the only way in and its failure is fatal.
+    trigger_ok = plc_ok if PLC_TRIGGER else modbus_ok
     # Once running, the ring should span its whole window. Falling short means
     # the byte ceiling is binding and clips will have a truncated pre-roll.
     buffer_ok = (ring["memory_evictions"] == 0
@@ -835,7 +962,7 @@ def health_snapshot():
 
     return {
         "node": NODE_NAME,
-        "healthy": bool(camera_ok and plc_ok and buffer_ok),
+        "healthy": bool(camera_ok and trigger_ok and buffer_ok),
         "uptime_s": round(now - _started_mono, 1),
         "utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "camera": {
@@ -868,6 +995,14 @@ def health_snapshot():
             "errors": st["plc_errors"],
             "poll_hz": st["plc_poll_hz"],
             "configured_poll_hz": POLL_HZ,
+        },
+        "modbus": {
+            "enabled": MODBUS_TEST_TRIGGER,
+            "state": st["modbus_state"],
+            "ok": modbus_ok,
+            "detail": st["modbus_detail"],
+            "bind": f"{MODBUS_BIND_IP}:{MODBUS_PORT}" if MODBUS_TEST_TRIGGER else None,
+            "coil_pdu": MODBUS_TRIGGER_PDU if MODBUS_TEST_TRIGGER else None,
         },
         "triggers": {
             "count": st["trigger_count"],
@@ -1246,14 +1381,10 @@ async def main():
         set_status(plc_state="disabled")
 
     if MODBUS_TEST_TRIGGER:
-        from pymodbus.server import StartAsyncTcpServer
-        context = build_modbus_context()
-        log.info("modbus test trigger on %s:%d (coil PDU %d)",
-                 MODBUS_BIND_IP, MODBUS_PORT, MODBUS_TRIGGER_PDU)
-        await StartAsyncTcpServer(context, address=(MODBUS_BIND_IP, MODBUS_PORT))
+        await serve_modbus()
     else:
-        while not _stop.is_set():
-            await asyncio.sleep(1)
+        set_status(modbus_state="disabled")
+        await _idle()
 
 
 def _run_service():

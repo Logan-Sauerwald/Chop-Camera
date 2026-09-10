@@ -12,10 +12,16 @@
 # ---------------------------------------------------------------------------
 
 # REQUIRED. Identifies this node in every clip filename and in the clip's
-# embedded metadata. Unique per Pi: chop1..chop5.
-# Deliberately blank in this example -- the service refuses to start until it
-# is set, because a node running under a copied name produces footage nobody
-# can trace back to a chop point.
+# embedded metadata. Examples: "chop1", "uw3".
+#
+# It must be unique across everything that shares an aggregator. Several
+# camera+aggregator setups run around the plant, so if their footage might ever
+# be pooled, include the machine: "sl3-uw1" rather than "uw1".
+#
+# Deliberately blank here -- the service refuses to start until it is set,
+# because a node running under a name copied from another Pi produces footage
+# nobody can trace back to a chop point, and there is no way to tell after the
+# fact.
 NODE_NAME=""
 
 # --- PLC trigger ------------------------------------------------------------
@@ -28,12 +34,20 @@ PLC_TRIGGER="true"
 # Aliases are accepted (ab, rockwell, logix, s7, simatic, tia, ...).
 PLC_TYPE="controllogix"
 
-# PLC address.
+# REQUIRED when PLC_TRIGGER="true". Address of the PLC this chop point's
+# trigger lives on.
+#
+# THIS IS PER NODE, NOT PER SITE. Different machines around the plant sit on
+# different subnets, and on some machines every chop point has its OWN PLC at
+# its own address. Never assume a value from another node's config applies
+# here -- confirm it with --test-trigger before starting the service.
+#
 #   ControlLogix: plain IP if the Ethernet port is on the CPU itself. With a
-#                 SEPARATE 1756-EN2T module, append the CPU slot: "10.2.4.1/1".
-#                 If connect times out but ping works, the slot is why.
+#                 SEPARATE 1756-EN2T module, append the CPU slot, e.g.
+#                 "<ip>/1". If connect times out but ping works, the slot is
+#                 why.
 #   Siemens:      plain IP. Rack/slot go in SIEMENS_RACK / SIEMENS_SLOT below.
-PLC_PATH="10.2.4.1"
+PLC_PATH=""
 
 # REQUIRED when PLC_TRIGGER="true". The boolean to watch; syntax depends on
 # PLC_TYPE.
@@ -55,7 +69,26 @@ PLC_PATH="10.2.4.1"
 #   Bit index must be 0-7. A bad address is a startup error, not a runtime one.
 #
 # Each chop point has its OWN trigger. This is a per-node value.
-TRIGGER_TAG="_R1_156N0:33:O.7"
+TRIGGER_TAG=""
+
+# --- worked examples --------------------------------------------------------
+# Real deployments, for reference. See docs/deployments.md for the full
+# per-machine tables. Copy the SHAPE, never the values.
+#
+# Allen-Bradley line -- one PLC, an output bit per chop point:
+#     PLC_TYPE="controllogix"
+#     PLC_PATH="10.2.4.1"                 # or "10.2.4.1/1" for a chassis slot
+#     TRIGGER_TAG="_R1_156N0:33:O.7"      # confirm with --list-tags
+#
+# Siemens unwinder line -- a SEPARATE PLC per station, a merker bit each:
+#     node uw1:  PLC_PATH="192.168.0.4"   TRIGGER_TAG="M158.7"
+#     node uw2:  PLC_PATH="192.168.0.8"   TRIGGER_TAG="M143.5"
+#     node uw3:  PLC_PATH="192.168.0.13"  TRIGGER_TAG="M155.6"
+#     node uw4:  PLC_PATH="192.168.0.14"  TRIGGER_TAG="M148.7"
+#     PLC_TYPE="siemens"                  # plus SIEMENS_RACK / SIEMENS_SLOT
+#
+# On that Siemens line BOTH values change per node -- there is no shared PLC
+# address to inherit, which is why neither ships with a default.
 
 # --- Siemens only -----------------------------------------------------------
 # Rack and slot of the CPU. Ignored when PLC_TYPE="controllogix".
@@ -97,7 +130,29 @@ MODBUS_TEST_TRIGGER="true"
 # commissioning -- that lets anyone on the plant network start a recording.
 MODBUS_BIND_IP="127.0.0.1"
 MODBUS_PORT="5020"
+
+# Which coil the trigger watches, as a PDU address. The Modbus PDU is ALWAYS
+# 0-based on the wire; the "00001" style in PLC documentation is a 1-based
+# display convention that maps to PDU 0. So a PLC configured to write "coil
+# 00001" arrives here as MODBUS_TRIGGER_PDU="0". If in doubt, watch the
+# journal: every coil write is logged with the PDU address it arrived on.
 MODBUS_TRIGGER_PDU="0"
+
+# PLC-PUSHED TRIGGERS (instead of this Pi polling the PLC)
+# If a machine's PLC writes the trigger TO this Pi rather than the Pi reading
+# it, set PLC_TRIGGER="false" and make this server the real trigger:
+#     MODBUS_TEST_TRIGGER="true"
+#     MODBUS_BIND_IP="0.0.0.0"
+#     MODBUS_PORT="502"          # the standard Modbus TCP port
+# Port 502 is privileged and this service does not run as root, so also
+# uncomment AmbientCapabilities=CAP_NET_BIND_SERVICE in chopcam.service.
+# The trigger is edge-driven, not polled: pymodbus calls into the datastore the
+# instant the PLC writes, so a momentary pulse cannot be missed. The coil is
+# reset to 0 immediately as a handshake acknowledgement -- if the PLC ladder
+# expects the bit to stay high until acknowledged elsewhere, use a second coil
+# for the ack rather than resetting this one.
+# With PLC_TRIGGER="false" a Modbus bind failure is fatal to node health and
+# /healthz says so, because nothing else can start a recording.
 
 # --- camera -----------------------------------------------------------------
 # 1920x1080 @ 120 is a CROPPED sensor readout on this module -- narrower field
@@ -178,11 +233,15 @@ PLAYBACK_MODE="realtime"
 # "true"  = push to the aggregator automatically.
 SHIP_ENABLED="false"
 
-# Used only when SHIP_ENABLED="true". Forward slashes work for both a Windows
-# scp target and a Linux one.
-AGG_USER="lsauerwald"
-AGG_IP="10.2.4.200"
-AGG_DIR="C:/Users/lsauerwald/Downloads/Chop_vids"
+# REQUIRED when SHIP_ENABLED="true"; ignored otherwise. Each machine has its
+# own aggregator on its own subnet, so these are per-setup, not plant-wide.
+# Forward slashes work for both a Windows scp target and a Linux one.
+#   AGG_USER="lsauerwald"
+#   AGG_IP="10.2.4.200"
+#   AGG_DIR="C:/Users/lsauerwald/Downloads/Chop_vids"
+AGG_USER=""
+AGG_IP=""
+AGG_DIR=""
 
 # How delivery is confirmed before the local copy is set aside:
 #   hash - SHA-256 compared on both ends (strongest)

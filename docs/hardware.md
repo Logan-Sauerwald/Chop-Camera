@@ -86,18 +86,24 @@ more than one camera per Pi.
 
 ## Network
 
+**Addresses are per machine, not plant-wide.** Every camera+aggregator setup
+around the plant sits on its own controls network — one line may be `10.2.4.x`
+while another is `192.168.0.x` — and on some machines each chop point has its
+own PLC. `docs/deployments.md` is the record of what each node actually talks
+to; the table below is only the first line's layout as an example of the shape.
+
 | Device | Address |
 |---|---|
 | ControlLogix PLC | 10.2.4.1 |
 | Node 1 | 10.2.4.100 |
 | Nodes 2–5 | 10.2.4.101–104 (planned) |
-| Aggregator | 10.2.4.200 (planned; matches `AGG_IP` in the config) |
+| Aggregator | 10.2.4.200 (planned; matches `AGG_IP` in that node's config) |
 
-Static IPs via NetworkManager, for example:
+Static IPs via NetworkManager, substituting this node's address:
 
 ```bash
 sudo nmcli con mod "Wired connection 1" ipv4.method manual \
-     ipv4.addresses 10.2.4.100/24 ipv4.never-default yes
+     ipv4.addresses <this-node-ip>/24 ipv4.never-default yes
 sudo nmcli con up "Wired connection 1"
 ```
 

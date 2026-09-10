@@ -21,6 +21,13 @@ User=chopcam
 Group=chopcam
 SupplementaryGroups=video
 
+# Uncomment ONLY if this node's PLC pushes the trigger to the Pi over Modbus
+# TCP on the standard port 502. Ports below 1024 are privileged, and without
+# this the bind fails -- capture keeps running but the trigger is dead, which
+# capture.py detects and reports at /healthz rather than letting pymodbus
+# claim "Server listening". Nodes that poll the PLC never need this.
+#AmbientCapabilities=CAP_NET_BIND_SERVICE
+
 WorkingDirectory=/opt/chopcam
 ExecStart=/opt/chopcam/venv/bin/python /opt/chopcam/src/capture.py
 Environment=CHOPCAM_CONF=/etc/chopcam.conf

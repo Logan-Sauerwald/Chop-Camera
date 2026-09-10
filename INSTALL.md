@@ -27,14 +27,22 @@ is pending instead.
 
 ## 2. Set the node's static IP
 
+Addresses differ per machine — a chop line may be on `10.2.4.x` while an
+unwinder line is on `192.168.0.x`. Take this node's address and its PLC's
+address from `docs/deployments.md`, not from another node.
+
 ```bash
 sudo nmcli con show                     # find the connection name
 sudo nmcli con mod "Wired connection 1" ipv4.method manual \
-     ipv4.addresses 10.2.4.100/24 ipv4.never-default yes
+     ipv4.addresses <this-node-ip>/24 ipv4.never-default yes
 sudo nmcli con up "Wired connection 1"
 ip -brief a                             # confirm eth0 has the address
-ping -c3 10.2.4.1                       # confirm the PLC answers
+ping -c3 <plc-ip>                       # confirm the PLC answers
 ```
+
+For example, on the chop line: `ipv4.addresses 10.2.4.100/24` and
+`ping -c3 10.2.4.1`. On the unwinder line node uw1: `192.168.0.x/24` and
+`ping -c3 192.168.0.4`.
 
 `ipv4.never-default yes` keeps Wi-Fi as the default route, so SSH and internet
 still work.
@@ -68,6 +76,9 @@ PLC_PATH="10.2.4.1"                  # add "/1" for the CPU slot in a chassis
 TRIGGER_TAG="_R1_156N0:33:O.7"
 ```
 
+On a ControlLogix line one PLC usually serves every chop point, so `PLC_PATH`
+is shared and only `TRIGGER_TAG` changes per node.
+
 **Confirm the tag name rather than trusting the default** — Rockwell output tags
 are often `...:O.Data.7` rather than `...:O.7`, or an alias:
 
@@ -82,11 +93,24 @@ right PLC) plus every matching tag. Paste the exact string into `TRIGGER_TAG`.
 
 ```
 PLC_TYPE="siemens"
-PLC_PATH="10.2.4.1"
-TRIGGER_TAG="DB100.DBX0.7"           # or Q0.7 / I3.2 / M10.3
+PLC_PATH="192.168.0.4"               # THIS station's PLC
+TRIGGER_TAG="M158.7"                 # or DB100.DBX0.7 / Q0.7 / I3.2
 SIEMENS_RACK="0"
 SIEMENS_SLOT="1"                     # S7-1200/1500 = 1, S7-300/400 = 2
 ```
+
+**Do not assume the PLC address is shared.** On the unwinder line every station
+has its own PLC, so `PLC_PATH` changes per node as well as `TRIGGER_TAG`:
+
+| Node | `PLC_PATH` | `TRIGGER_TAG` |
+|---|---|---|
+| uw1 | `192.168.0.4` | `M158.7` |
+| uw2 | `192.168.0.8` | `M143.5` |
+| uw3 | `192.168.0.13` | `M155.6` |
+| uw4 | `192.168.0.14` | `M148.7` |
+
+Merker (`M`) addresses need PUT/GET permitted, but not the "optimized block
+access" change — that only applies to data blocks (`DB…`).
 
 Address forms: `DB100.DBX0.7` (data block), `Q0.7` or `A0.7` (outputs),
 `I3.2` or `E3.2` (inputs), `M10.3` (merkers). Bit index must be 0–7.
@@ -231,7 +255,10 @@ scp <pi>:/var/lib/chopcam/encoded/*.mp4 .
 ## 7. Automatic transfer (optional)
 
 Only when the aggregator exists. Set `SHIP_ENABLED="true"` plus `AGG_USER`,
-`AGG_IP`, `AGG_DIR` in `/etc/chopcam.conf`.
+`AGG_IP`, `AGG_DIR` in `/etc/chopcam.conf` — the service refuses to start with
+`SHIP_ENABLED="true"` and any of them blank, because a half-configured target
+is a way to lose footage (the node deletes its local copy once delivery
+verifies). Each machine has its own aggregator; see `docs/deployments.md`.
 
 For a **Windows** aggregator: enable OpenSSH Server (Settings → Optional
 features), then in an Administrator PowerShell:
@@ -264,7 +291,7 @@ This must print `ok` with **no prompt**, or the timer job fails silently every
 five minutes:
 
 ```bash
-ssh -o BatchMode=yes user@10.2.4.200 "powershell -NoProfile -Command \"echo ok\""
+ssh -o BatchMode=yes <agg-user>@<agg-ip> "powershell -NoProfile -Command \"echo ok\""
 ```
 
 ## Troubleshooting
@@ -287,6 +314,9 @@ ssh -o BatchMode=yes user@10.2.4.200 "powershell -NoProfile -Command \"echo ok\"
 | `... is already TRUE at connect` | normal after a reconnect on a latched bit; no phantom clip is recorded |
 | `pre-roll short by Ns` | normal for a trigger in the first seconds after start; otherwise the ring hit `BUFFER_MAX_MB` — check `buffer.memory_evictions` in `/healthz` |
 | `ring buffer hit its N MB ceiling` | the stream is fatter than budgeted; raise `BUFFER_MAX_MB` *and* `MemoryMax=` in `chopcam.service` |
-| `/healthz` returns 503 | camera stalled or PLC disconnected; the JSON says which |
+| `/healthz` returns 503 | camera stalled, trigger disconnected, or the ring buffer is memory-bound; the JSON says which |
+| `modbus trigger DISABLED` | port busy, privileged (needs `CAP_NET_BIND_SERVICE`), or pymodbus missing — capture keeps running regardless |
+| PLC-pushed trigger never fires | check `MODBUS_TRIGGER_PDU`: a PLC writing "coil 00001" arrives as PDU `0`. Every coil write is logged with the PDU it landed on |
+| `is the address from the shipped example` | `PLC_PATH` was copied from the example and may not be this machine's PLC |
 | `hash check failed (remote='empty')` | PowerShell quoting; set `VERIFY_MODE="size"` |
 | Disk filling | `SHIP_ENABLED="false"` keeps every clip forever; copy them off and delete |

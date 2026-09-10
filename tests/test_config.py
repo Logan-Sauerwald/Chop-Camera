@@ -191,10 +191,12 @@ class TestMemoryBudget(unittest.TestCase):
         capture._cgroup_memory_limit_bytes = self._limit
 
     def _warn(self, mb, limit_mb):
+        """Only the memory-budget warnings -- config_warnings() also reports
+        unrelated things like a placeholder PLC address."""
         capture.BUFFER_MAX_MB = mb
         capture._cgroup_memory_limit_bytes = (
             lambda: None if limit_mb is None else limit_mb * 1024 * 1024)
-        return capture.config_warnings()
+        return [w for w in capture.config_warnings() if "BUFFER_MAX_MB" in w]
 
     def test_default_budget_fits_the_shipped_memorymax(self):
         # chopcam.service sets MemoryMax=1500M; the 31 s default must fit.
