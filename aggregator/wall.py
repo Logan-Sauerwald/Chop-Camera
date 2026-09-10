@@ -211,8 +211,17 @@ def list_clips(limit=None):
                 "recorded_utc": when.isoformat(timespec="seconds") if when else None,
                 "mb": round(st.st_size / (1024 * 1024), 1),
                 "received": st.st_mtime,
+                # Sort key: when the chop HAPPENED, not when the file landed.
+                # A node that was offline delivers a backlog in one burst, so
+                # every mtime is within the same second and their order is
+                # whatever the filesystem hands back -- which made "last chop"
+                # able to pick a clip hours older than the newest one.
+                # Falls back to mtime for a name that will not parse.
+                # An epoch float, not the ISO string, so clips written with a
+                # local-time offset still order correctly against UTC ones.
+                "_order": when.timestamp() if when else st.st_mtime,
             })
-    out.sort(key=lambda c: c["received"], reverse=True)
+    out.sort(key=lambda c: c["_order"], reverse=True)
     return out[:limit] if limit else out
 
 
@@ -822,8 +831,9 @@ class WallHandler(BaseHTTPRequestHandler):
         elif path == "/status":
             self._json(aggregate_status())
         elif path == "/clips":
-            self._json({"incoming_dir": INCOMING_DIR,
-                        "clips": list_clips(CLIP_LIST_LIMIT)})
+            clips = [{k: v for k, v in c.items() if not k.startswith("_")}
+                     for c in list_clips(CLIP_LIST_LIMIT)]
+            self._json({"incoming_dir": INCOMING_DIR, "clips": clips})
         elif path == "/healthz":
             status = aggregate_status()
             writable = os.path.isdir(INCOMING_DIR) and os.access(INCOMING_DIR, os.W_OK)
