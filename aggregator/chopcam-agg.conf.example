@@ -1,0 +1,43 @@
+# ---------------------------------------------------------------------------
+# chopcam AGGREGATOR configuration  (one per install)
+#
+# Copy to /etc/chopcam-agg.conf and edit. Same format as the node config:
+#   KEY="value"   -- no spaces around '=', always quote values.
+# Trailing comments after a value are fine.
+#
+# This is the aggregator half. The capture Pis have their own
+# /etc/chopcam.conf -- see chopcam.conf.example at the repo root.
+# ---------------------------------------------------------------------------
+
+# Which install this aggregator serves. Must match SITE on its capture nodes,
+# so clip names arriving here line up with the wall.
+SITE=""
+
+# The capture nodes this aggregator watches, as "name=address" pairs separated
+# by spaces. The name is the node's NODE_NAME (not SITE-NODE_NAME).
+#
+# The number of nodes varies per install -- add or remove entries, nothing else
+# changes.
+#
+#   NODES="uw1=192.168.0.101 uw2=192.168.0.102 uw3=192.168.0.103 uw4=192.168.0.104"
+NODES=""
+
+# HTTP port each capture node serves its preview and health on. This is
+# LIVE_PORT in the node config; they must match.
+NODE_PORT="8080"
+
+# How often the aggregator polls each node's /healthz, in seconds. This is
+# cheap (a small JSON fetch) and is what makes a dead node visible on the wall
+# instead of just a frozen tile.
+POLL_SECONDS="5"
+
+# Port the wall is served on. Open http://<aggregator>:8090/ on the monitor.
+WALL_PORT="8090"
+WALL_HOST="0.0.0.0"
+
+# Where the nodes deliver clips. This must match AGG_DIR in each node's config,
+# and the account the nodes ssh in as must be able to write here.
+INCOMING_DIR="/srv/chopcam/incoming"
+
+# Newest N clips listed on the wall and at /clips.
+CLIP_LIST_LIMIT="50"

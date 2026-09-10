@@ -98,16 +98,14 @@ sudoedit /etc/chopcam.conf     # NODE_NAME, PLC_TYPE, PLC_PATH, TRIGGER_TAG
 
 ---
 
-## Machines using a PLC-pushed trigger
+## Aggregators
 
-Where the PLC writes to the Pi instead of the Pi polling it, record the coil
-address as a **PDU** number. The Modbus PDU is always 0-based on the wire; a
-PLC configured for "coil `00001`" arrives as PDU `0`.
+One per install. `SITE` here must match `SITE` on that install's nodes, or
+delivered clips cannot be matched to the tiles that recorded them.
 
-| Node | Machine | `MODBUS_BIND_IP` | `MODBUS_PORT` | `MODBUS_TRIGGER_PDU` | Notes |
-|---|---|---|---|---|---|
-| | | | | | |
+| Install (`SITE`) | Aggregator IP | `INCOMING_DIR` | Nodes (`NODES`) |
+|---|---|---|---|
+| | | | |
 
-Those nodes set `PLC_TRIGGER="false"`, and need
-`AmbientCapabilities=CAP_NET_BIND_SERVICE` uncommented in `chopcam.service` if
-they bind port 502.
+Each node at that install sets `AGG_IP` to the aggregator, `AGG_DIR` to the
+same path as `INCOMING_DIR`, and `AGG_OS="linux"` (the aggregator is a Pi 5).

@@ -23,6 +23,35 @@ PIN_SNAP7="python-snap7>=3.1,<4"
 # Modbus bench trigger relies on no longer works there.
 PIN_PYMODBUS="pymodbus>=3.8,<3.9"
 
+SEED_CONF=""
+APPLY_NETWORK=false
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --conf)
+            SEED_CONF="${2:-}"; shift 2
+            [[ -n "$SEED_CONF" ]] || { echo "--conf needs a file" >&2; exit 1; }
+            ;;
+        --apply-network) APPLY_NETWORK=true; shift ;;
+        -h|--help)
+            cat <<'USAGE'
+install.sh -- set up a chopcam capture node.
+
+  sudo ./install.sh                       interactive: installs, then you edit
+                                          /etc/chopcam.conf
+  sudo ./install.sh --conf node.conf      install with a prepared config
+                                          (the repeatable path for a rollout)
+  sudo ./install.sh --conf node.conf --apply-network
+                                          also set this node's static IP from
+                                          NODE_IP/NODE_CIDR/NODE_INTERFACE
+
+An existing /etc/chopcam.conf is never overwritten unless --conf is given.
+USAGE
+            exit 0
+            ;;
+        *) echo "Unknown option: $1 (try --help)" >&2; exit 1 ;;
+    esac
+done
+
 if [[ $EUID -ne 0 ]]; then
     echo "Run with sudo: sudo ./install.sh" >&2
     exit 1
@@ -67,11 +96,57 @@ sudo -u "$RUN_USER" "$INSTALL_DIR/venv/bin/pip" list 2>/dev/null \
     | grep -iE 'pycomm3|snap7|pymodbus' | sed 's/^/      /'
 
 echo "==> Config"
-if [[ -f "$CONF" ]]; then
+if [[ -n "$SEED_CONF" ]]; then
+    [[ -f "$SEED_CONF" ]] || { echo "    no such file: $SEED_CONF" >&2; exit 1; }
+    if [[ -f "$CONF" ]] && ! cmp -s "$SEED_CONF" "$CONF"; then
+        cp "$CONF" "$CONF.bak.$(date +%Y%m%d%H%M%S)"
+        echo "    existing $CONF backed up"
+    fi
+    install -m 0644 "$SEED_CONF" "$CONF"
+    echo "    installed $CONF from $SEED_CONF"
+elif [[ -f "$CONF" ]]; then
     echo "    $CONF exists, leaving it alone"
 else
     cp "$REPO/chopcam.conf.example" "$CONF"
     echo "    created $CONF -- EDIT IT before starting the service"
+fi
+
+# --- this node's static IP -------------------------------------------------
+# Bringing networking into the same file is what makes commissioning a node a
+# single-file job. Without it the procedure is "edit the conf AND remember the
+# nmcli incantation", which is where per-node mistakes come from.
+if [[ "$APPLY_NETWORK" == true ]]; then
+    echo "==> Network"
+    NODE_IP="" NODE_CIDR="" NODE_INTERFACE=""
+    # shellcheck source=/dev/null
+    source "$CONF"
+    if [[ -z "${NODE_IP:-}" ]]; then
+        echo "    NODE_IP is blank in $CONF -- leaving networking alone"
+    elif ! command -v nmcli >/dev/null; then
+        echo "    nmcli not found -- set the address by hand" >&2
+    else
+        conn="${NODE_INTERFACE:-}"
+        if [[ -z "$conn" ]]; then
+            # First active ethernet connection; the usual Pi OS name is
+            # "Wired connection 1" but it is not guaranteed.
+            conn="$(nmcli -t -f NAME,TYPE con show --active \
+                    | awk -F: '$2=="802-3-ethernet"{print $1; exit}')"
+            [[ -z "$conn" ]] && conn="$(nmcli -t -f NAME,TYPE con show \
+                    | awk -F: '$2=="802-3-ethernet"{print $1; exit}')"
+        fi
+        if [[ -z "$conn" ]]; then
+            echo "    no ethernet connection found -- set NODE_INTERFACE" >&2
+        else
+            echo "    $conn -> ${NODE_IP}/${NODE_CIDR:-24}"
+            # never-default keeps Wi-Fi carrying the default route, so SSH and
+            # internet survive putting this port on an isolated controls VLAN.
+            nmcli con mod "$conn" ipv4.method manual \
+                  ipv4.addresses "${NODE_IP}/${NODE_CIDR:-24}" \
+                  ipv4.never-default yes
+            nmcli con up "$conn" >/dev/null || \
+                echo "    (bring-up reported an error; check 'ip -brief a')" >&2
+        fi
+    fi
 fi
 
 echo "==> Camera access"
@@ -108,7 +183,7 @@ cat <<MSG
 Done.
 
 Next:
-  1. Edit $CONF   (at minimum: NODE_NAME, PLC_TYPE, PLC_PATH, TRIGGER_TAG)
+  1. Edit $CONF   (at minimum: SITE, NODE_NAME, PLC_TYPE, PLC_PATH, TRIGGER_TAG)
      then re-check it:
        $INSTALL_DIR/venv/bin/python $INSTALL_DIR/src/capture.py --check-config
   2. Confirm the PLC trigger (connects, then characterises the bit):

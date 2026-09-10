@@ -294,6 +294,78 @@ forever. Capture, preview and the Modbus bench trigger keep running.
 
 ---
 
+## One install = one aggregator + N nodes
+
+The system is deployed several times around the plant. Each install is one
+aggregator (a Pi 5) and however many capture nodes that machine needs, on its
+own subnet. Nothing is plant-wide except the code.
+
+What varies per install, and where it lives:
+
+| Varies | Setting |
+|---|---|
+| Subnet | `NODE_IP` per node, `PLC_PATH` per node |
+| Number of nodes | just add configs; `NODES` on the aggregator |
+| PLC family | `PLC_TYPE` per node — installs can even mix families |
+| Number of PLCs | `PLC_PATH` per node. One shared PLC and one-PLC-per-station are the same code path |
+| Trigger address | `TRIGGER_TAG` per node |
+| Lighting | `CAMERA_CONTROLS` per install |
+| Aggregator | `AGG_*` per node |
+
+`SITE` is the install's name and is shared by every Pi at that install; only
+the per-node values differ. That split is what makes a per-install config
+template work: copy it to each Pi, change four values. Clips are labelled
+`SITE-NODE_NAME`, so `chop1` at five installs stays unambiguous.
+
+### The aggregator is deliberately dumb
+
+It never decodes or encodes video. The browser pulls MJPEG straight from each
+node, and the aggregator only polls `/healthz` and lists a directory. That is
+why a Pi 5 can drive a wall of cameras while staying near idle — and why
+adding a camera costs the aggregator almost nothing.
+
+It polls node health server-side rather than from page JavaScript because the
+nodes send no CORS headers, so the browser cannot read their `/healthz`
+directly. MJPEG `<img>` tags are not CORS-restricted, so video still comes
+straight from the nodes.
+
+### AGG_OS has a silent failure mode
+
+The aggregator is a Pi 5, so `AGG_OS="linux"`. Set it to `windows` against a
+Linux aggregator and nothing errors: `scp` succeeds, the PowerShell verify
+command produces nothing, the clip is never marked delivered, and the **same
+clip re-ships every timer run forever** — duplicates accumulating on the
+aggregator while the node's `encoded/` never drains.
+
+`postprocess.sh` now distinguishes the two signatures. A verify that returns
+*nothing* names `AGG_OS`; a verify that returns a *different* value is real
+corruption and says so instead. Both were the same message before, which meant
+a wrong `AGG_OS` looked like a bad network.
+
+The ship path has been run end to end against a real Linux target — transcode,
+scp, SHA-256 verify, move to `sent/` — including a destination path containing
+a space, and a simulated truncated delivery, which was correctly refused.
+
+### Camera controls are a per-install setting
+
+The module ships with auto-exposure on (Aperture Priority) and a default
+exposure of **15.6 ms**. At 120 fps a frame is **8.33 ms**, and exposure cannot
+exceed the frame period — so in anything short of bright light the camera
+quietly drops to ~64 fps, and the frames it does deliver carry 15 ms of blade
+travel smeared across them. That defeats the point of the system while looking
+like a working camera.
+
+`CAMERA_CONTROLS` pins v4l2 controls before ffmpeg opens the device, and again
+on every capture restart because UVC controls do not reliably survive the
+device being reopened. Controls are applied one at a time and in order:
+`exposure_time_absolute` is inactive until `auto_exposure` has been set to
+manual, so the order matters.
+
+Lighting differs at every install, which is why this is per-install rather
+than a built-in default. Also worth setting: `power_line_frequency` (2 = 60 Hz
+in North America; the camera defaults to 50 Hz), and `focus_automatic_continuous=0`
+so autofocus cannot hunt mid-chop on a fixed mount.
+
 ## Why one Pi per camera
 
 Two independent reasons.
@@ -402,18 +474,17 @@ Options that were considered and rejected:
    (a PLC that answers in 50 ms makes `POLL_HZ=30` a 20 Hz poll). If a fast
    chop is missed, the pulse was shorter than the real poll interval — raise
    `POLL_HZ` or have controls latch the bit.
-3. **Test the transfer end to end.** The PowerShell `Get-FileHash` call over
-   SSH is written but untested; quoting through ssh → cmd → powershell is
-   finicky. If the log shows `hash check failed (remote='empty')`, that's the
-   quoting — set `VERIFY_MODE="size"`, which still catches the realistic
-   failure since SSH guarantees integrity in transit.
-4. **Build the aggregator.** Pi 5 + NVMe. The preview wall is mostly free: each
-   node already serves MJPEG-over-HTTP, so a page with five `<img
-   src="http://10.2.4.10X:8080/stream">` tags in Chromium kiosk mode is close
-   to the whole job. Drop `LIVE_FPS` to 5–8 per node so the display isn't
-   decoding five full-rate streams. Poll each node's `/healthz` alongside it and
-   colour the tile — a grey tile with no explanation is the thing that wastes an
-   afternoon.
+3. **Test the transfer against the real aggregator.** The Linux path has been
+   run end to end (transcode → scp → SHA-256 verify → `sent/`), including a
+   truncated delivery, which was refused. What is untested is *this plant's*
+   aggregator: key auth, the account, and that `AGG_DIR` matches
+   `INCOMING_DIR`. Confirm `ssh -o BatchMode=yes <agg> true` returns without a
+   prompt before enabling `SHIP_ENABLED`.
+4. **Run the aggregator on real hardware.** Pi 5 + NVMe. The wall, node status
+   and clip listing are built (`aggregator/`) and verified against simulated
+   nodes in all three states, but not on a real Pi 5 with real cameras. Drop
+   `LIVE_FPS` to 5–8 per node first. Still missing: clip retention and
+   playback.
 5. **Storage.** ~7 GB/day across five nodes at one chop/hour. A 1 TB SSD holds
    ~5 months. Use an SSD, not an SD card — SD cards wear out under continuous
    writes and fail in ways that lose data.

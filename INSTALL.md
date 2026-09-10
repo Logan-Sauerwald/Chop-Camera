@@ -53,8 +53,22 @@ still work.
 sudoedit /etc/chopcam.conf
 ```
 
-At minimum set `NODE_NAME`, `PLC_TYPE`, `PLC_PATH`, and `TRIGGER_TAG`. Every
-option is commented in the file.
+At minimum set `SITE`, `NODE_NAME`, `PLC_TYPE`, `PLC_PATH`, and `TRIGGER_TAG`.
+Every option is commented in the file.
+
+`SITE` names the install and is the same on every Pi there; the rest are
+per-node. Clips are labelled `SITE-NODE_NAME`, so `chop1` at two installs stays
+distinguishable.
+
+For a rollout, prepare each node's config first and hand it to the installer
+instead of editing on the Pi — that is the repeatable path:
+
+```bash
+sudo ./install.sh --conf uw1.conf --apply-network
+```
+
+`--apply-network` also sets the node's static IP from `NODE_IP` / `NODE_CIDR`
+in that file, so commissioning a node really is one file.
 
 `NODE_NAME` ships blank on purpose and the service refuses to start without it:
 a node running under a name copied from another Pi produces clips nobody can

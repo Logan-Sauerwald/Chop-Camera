@@ -21,8 +21,9 @@ H.264 and collected on an aggregator for review in slow motion.
 | Config validation + unit tests | **working** |
 | PLC trigger — ControlLogix (EtherNet/IP) | **written, never tested against a real PLC** |
 | PLC trigger — Siemens S7 (ISO-on-TCP) | **written, never tested against a real PLC** |
-| Transfer to aggregator | **written, never tested end to end** |
-| Aggregator / preview wall | **not built** |
+| Transfer to aggregator (Linux) | **tested end to end, not on real hardware** |
+| Aggregator — live wall + node status | **built, not run on real hardware** |
+| Aggregator — clip retention / playback | **not built** |
 | Nodes 2–5 | **not purchased** |
 
 Read `HANDOFF.md` before changing anything. It records what was measured, what
@@ -63,6 +64,23 @@ The split matters: capture must never drop frames, and `libx264` on a Pi 4
 takes about **ten minutes** per clip. So the writer only copies compressed
 bytes, and all encoding happens later at idle priority.
 
+## Two roles
+
+One repo, two machines. They share the config format and the clip-naming
+contract, which is why they live together — a node and its aggregator cannot
+drift apart on how a value is spelled or how a clip is named.
+
+| | Capture node (Pi 4, one per chop point) | Aggregator (Pi 5, one per install) |
+|---|---|---|
+| Code | `src/` | `aggregator/` |
+| Setup | `sudo ./install.sh` | `sudo aggregator/install-aggregator.sh` |
+| Config | `/etc/chopcam.conf` | `/etc/chopcam-agg.conf` |
+| Does | buffers, triggers, records, transcodes, ships | receives clips, drives the wall, shows node health |
+
+An install is one aggregator plus however many nodes that machine needs.
+Adding a camera is a new node config plus one entry in the aggregator's
+`NODES`. See `aggregator/README.md` and `docs/deployments.md`.
+
 ## Layout
 
 ```
@@ -72,6 +90,7 @@ src/capture.py         capture service (buffer, triggers, preview, clip writer)
 src/plc.py             PLC drivers: ControlLogix + Siemens behind one interface
 src/postprocess.sh     transcode, ship, purge
 systemd/               service + timer units
+aggregator/            the aggregator half — wall, node status, clip landing
 tests/                 unit tests — run with no PLC and no camera attached
 docs/hardware.md       parts, measurements, camera and lens notes
 HANDOFF.md             design reasoning and open items — read this

@@ -1,0 +1,37 @@
+[Unit]
+Description=chopcam aggregator - live preview wall and node status
+Documentation=file:/opt/chopcam-agg/README.md
+After=network-online.target
+Wants=network-online.target
+
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+
+# install-aggregator.sh rewrites User/Group to the installing account.
+User=chopcam
+Group=chopcam
+
+WorkingDirectory=/opt/chopcam-agg
+ExecStart=/usr/bin/python3 /opt/chopcam-agg/wall.py
+Environment=CHOPCAM_AGG_CONF=/etc/chopcam-agg.conf
+
+Restart=always
+RestartSec=10
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=chopcam-wall
+
+# Only reads node health over HTTP and lists a directory; it never touches
+# video, which is why it costs almost nothing.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/srv/chopcam
+
+[Install]
+WantedBy=multi-user.target

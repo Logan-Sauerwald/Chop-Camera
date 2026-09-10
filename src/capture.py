@@ -54,58 +54,13 @@ from queue import Queue, Empty
 # Make sibling modules (plc.py) importable regardless of cwd.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-CONFIG_SEARCH = [
-    os.environ.get("CHOPCAM_CONF"),
-    "/etc/chopcam.conf",
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "chopcam.conf"),
-]
+# Parsing lives in chopcam_config so the aggregator reads the same format the
+# same way; see the note there about bash and Python having to agree.
+from chopcam_config import (                            # noqa: E402
+    CONFIG_SEARCH, load_config, parse_config_value,
+)
 
-
-def parse_config_value(raw):
-    """Parse one bash-style RHS the way `source` would, for our subset.
-
-    Handles  KEY="30"  KEY='30'  KEY=30  and strips trailing comments:
-        POLL_HZ="60"   # faster     ->  60
-        POLL_HZ=60     # faster     ->  60
-        NOTE="a # b"                ->  a # b
-    Without this, an inline comment silently made the value unparseable and the
-    setting reverted to its built-in default while bash still read it correctly
-    -- the two readers of this file disagreed and nothing said so.
-    """
-    raw = raw.strip()
-    if not raw:
-        return ""
-    if raw[0] in "\"'":
-        quote = raw[0]
-        end = raw.find(quote, 1)
-        return raw[1:] if end < 0 else raw[1:end]
-    return raw.split("#", 1)[0].strip()
-
-
-def load_config(path=None):
-    """Parse the shared KEY="value" config that postprocess.sh also sources."""
-    candidates = [path] if path else CONFIG_SEARCH
-    for cand in candidates:
-        if cand and os.path.isfile(cand):
-            cfg = {}
-            with open(cand) as fh:
-                for line in fh:
-                    line = line.strip()
-                    if line.startswith("export "):
-                        line = line[len("export "):].lstrip()
-                    if not line or line.startswith("#") or "=" not in line:
-                        continue
-                    key, _, val = line.partition("=")
-                    key = key.strip()
-                    if not key.isidentifier():
-                        continue            # not a plain assignment; skip
-                    cfg[key] = parse_config_value(val)
-            cfg["_path"] = cand
-            return cfg
-    raise SystemExit(
-        "No config found. Copy chopcam.conf.example to /etc/chopcam.conf.\n"
-        "Searched: " + ", ".join(c for c in candidates if c)
-    )
+__all__ = ["CONFIG_SEARCH", "load_config", "parse_config_value"]
 
 
 def _argv_value(flag, default=None):
@@ -152,7 +107,14 @@ def log_early(msg):
     _early_warnings.append(msg)
 
 
+# Install identity. Every Pi at one aggregator shares SITE; only NODE_NAME
+# differs. Keeping them separate is what makes a per-install conf template
+# possible -- copy it to each Pi and change NODE_NAME, PLC_PATH, TRIGGER_TAG
+# and NODE_IP, nothing else.
+SITE      = _s("SITE", "")
 NODE_NAME = _s("NODE_NAME", "")
+# What actually labels a clip. Unique plant-wide once SITE is set.
+CLIP_ID   = f"{SITE}-{NODE_NAME}" if SITE else NODE_NAME
 
 PLC_TRIGGER = _b("PLC_TRIGGER", True)
 PLC_TYPE    = _s("PLC_TYPE", "controllogix")
@@ -165,7 +127,8 @@ MODBUS_BIND_IP      = _s("MODBUS_BIND_IP", "127.0.0.1")
 MODBUS_PORT         = _i("MODBUS_PORT", 5020)
 MODBUS_TRIGGER_PDU  = _i("MODBUS_TRIGGER_PDU", 0)
 
-CAMERA_DEVICE = _s("CAMERA_DEVICE", "/dev/video0")
+CAMERA_DEVICE   = _s("CAMERA_DEVICE", "/dev/video0")
+CAMERA_CONTROLS = _s("CAMERA_CONTROLS", "")
 FRAME_WIDTH   = _i("FRAME_WIDTH", 1920)
 FRAME_HEIGHT  = _i("FRAME_HEIGHT", 1080)
 FPS           = max(1, _i("FPS", 120))
@@ -182,6 +145,8 @@ SHIP_ENABLED = _b("SHIP_ENABLED", False)
 AGG_USER     = _s("AGG_USER", "")
 AGG_IP       = _s("AGG_IP", "")
 AGG_DIR      = _s("AGG_DIR", "")
+AGG_OS       = _s("AGG_OS", "linux").strip().lower()
+AGG_PORT     = _i("AGG_PORT", 22)
 
 STATE_DIR  = _s("STATE_DIR", "/var/lib/chopcam")
 OUTPUT_DIR = os.path.join(STATE_DIR, "raw")
@@ -376,6 +341,12 @@ def validate_config():
             "filename. Use letters, digits, dot, dash or underscore only."
         )
 
+    if SITE and not _NAME_RE.match(SITE):
+        problems.append(
+            f"SITE={SITE!r} contains characters that are not safe in a "
+            "filename. Use letters, digits, dot, dash or underscore only."
+        )
+
     if CLIP_TIMESTAMP not in ("utc", "local"):
         problems.append(
             f"CLIP_TIMESTAMP={CLIP_TIMESTAMP!r} must be \"utc\" or \"local\"."
@@ -398,6 +369,14 @@ def validate_config():
             problems.append(f"PLC config: {exc}")
         except ImportError as exc:                    # pragma: no cover
             problems.append(f"PLC driver import failed: {exc}")
+
+    if SHIP_ENABLED and AGG_OS not in ("linux", "windows"):
+        problems.append(
+            f"AGG_OS={AGG_OS!r} must be \"linux\" or \"windows\". The "
+            "aggregator is a Pi 5 running Pi OS, so \"linux\" is normal; "
+            "getting this wrong means clips upload but never verify, and the "
+            "same clip re-ships every timer run."
+        )
 
     if SHIP_ENABLED:
         # Shipping to the wrong host is worse than not shipping: the node
@@ -446,6 +425,19 @@ def _cgroup_memory_limit_bytes():
     return None
 
 
+def _clock_is_synchronised():
+    """True if NTP says the clock is good, or if we cannot tell."""
+    try:
+        out = subprocess.run(
+            ["timedatectl", "show", "-p", "NTPSynchronized", "--value"],
+            capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return True          # not systemd, or no timedatectl -- do not nag
+    if out.returncode != 0:
+        return True
+    return out.stdout.strip().lower() != "no"
+
+
 def config_warnings():
     """Non-fatal problems worth saying out loud at startup."""
     warnings = []
@@ -480,6 +472,17 @@ def config_warnings():
             "pushes the trigger to this Pi."
         )
 
+    # Clip names and metadata are UTC, which only lines cameras up if every
+    # node agrees on the time. One unsynchronised Pi puts its clips in the
+    # wrong place on the review timeline and nothing about the file says so.
+    if not _clock_is_synchronised():
+        warnings.append(
+            "the system clock is not NTP-synchronised. Clip timestamps are "
+            "UTC and are what line several cameras up on the same chop, so "
+            "an unsynchronised node produces footage that cannot be "
+            "correlated. Check with: timedatectl"
+        )
+
     expected = BUFFER_SECONDS * 14.75      # measured 118 Mbps peak
     if BUFFER_MAX_MB < expected:
         warnings.append(
@@ -498,7 +501,7 @@ def log_effective_config():
     without anyone reading the file over SSH.
     """
     log.info("chopcam node %s | config %s | clips -> %s",
-             NODE_NAME, C.get("_path"), OUTPUT_DIR)
+             CLIP_ID, C.get("_path"), OUTPUT_DIR)
     log.info("  camera : %s %dx%d @ %d fps requested",
              CAMERA_DEVICE, FRAME_WIDTH, FRAME_HEIGHT, FPS)
     log.info("  buffer : %ds window, %d MB ceiling  (~%.0f MB expected at "
@@ -936,7 +939,7 @@ def _live_page():
     </svg>
     <div class="tag">%(node)s</div>
   </div>
-</body></html>""" % {"node": NODE_NAME}).encode("utf-8")
+</body></html>""" % {"node": CLIP_ID}).encode("utf-8")
 
 
 def health_snapshot():
@@ -962,6 +965,8 @@ def health_snapshot():
 
     return {
         "node": NODE_NAME,
+        "site": SITE or None,
+        "clip_id": CLIP_ID,
         "healthy": bool(camera_ok and trigger_ok and buffer_ok),
         "uptime_s": round(now - _started_mono, 1),
         "utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -1144,6 +1149,58 @@ def extract_jpeg_frames(buf):
     return frames
 
 
+def apply_camera_controls():
+    """Pin v4l2 controls before ffmpeg opens the camera.
+
+    This matters more than it looks. The module ships with auto-exposure on
+    (Aperture Priority) and a default exposure of 15.6 ms, while 120 fps allows
+    only 8.33 ms per frame -- exposure cannot exceed the frame period, so the
+    camera silently drops to ~64 fps in anything less than bright light, and
+    what frames it does deliver carry 15 ms of motion blur across a moving
+    blade. Autofocus can also hunt mid-event on a fixed mount.
+
+    Every install has different lighting, so this is a per-install setting.
+    Applied one control at a time and in order, because exposure_time_absolute
+    is inactive until auto_exposure has been set to manual.
+
+    Failures are logged, never fatal: a camera that will not take a control
+    still records.
+    """
+    if not CAMERA_CONTROLS.strip():
+        return
+    pairs = [p.strip() for p in CAMERA_CONTROLS.split(",") if p.strip()]
+    applied, failed = [], []
+    for pair in pairs:
+        if "=" not in pair:
+            log.warning("camera control %r is not name=value; skipping", pair)
+            failed.append(pair)
+            continue
+        try:
+            res = subprocess.run(
+                ["v4l2-ctl", "-d", CAMERA_DEVICE, f"--set-ctrl={pair}"],
+                capture_output=True, text=True, timeout=10)
+        except FileNotFoundError:
+            log.warning("v4l2-ctl not found -- camera controls not applied "
+                        "(sudo apt install v4l-utils)")
+            return
+        except (OSError, subprocess.SubprocessError) as exc:
+            log.warning("camera control %s failed: %s", pair, exc)
+            failed.append(pair)
+            continue
+        if res.returncode == 0:
+            applied.append(pair)
+        else:
+            failed.append(pair)
+            log.warning("camera control %s rejected: %s", pair,
+                        (res.stderr or res.stdout).strip()[:120])
+    if applied:
+        log.info("camera controls applied: %s", ", ".join(applied))
+    if failed:
+        log.warning("camera controls NOT applied: %s -- check the names with "
+                    "v4l2-ctl -d %s --list-ctrls",
+                    ", ".join(failed), CAMERA_DEVICE)
+
+
 def capture_loop():
     """Pull MJPEG frames off the camera and push JPEG bytes into the buffer.
 
@@ -1163,6 +1220,9 @@ def capture_loop():
     while not _stop.is_set():
         log.info("starting camera capture: %s", CAMERA_DEVICE)
         set_status(camera_state="opening")
+        # Re-applied on every restart: UVC controls do not reliably survive
+        # the device being closed and reopened.
+        apply_camera_controls()
         if not first:
             bump_status("camera_restarts")
         first = False
@@ -1223,7 +1283,7 @@ def clip_basename(t_wall_utc):
         stamp = t_wall_utc.astimezone().strftime("%Y%m%d_%H%M%S%z")
     else:
         stamp = t_wall_utc.strftime("%Y%m%d_%H%M%S") + "Z"
-    return f"event_{stamp}_{NODE_NAME}"
+    return f"event_{stamp}_{CLIP_ID}"
 
 
 def writer_loop():
@@ -1286,8 +1346,8 @@ def writer_loop():
         ext = "mkv" if ENCODE == "mjpeg" else "mp4"
         base = clip_basename(t_wall)
         meta = {
-            "title": f"{NODE_NAME} {t_wall.isoformat(timespec='seconds')}",
-            "comment": (f"node={NODE_NAME} trigger={source} "
+            "title": f"{CLIP_ID} {t_wall.isoformat(timespec='seconds')}",
+            "comment": (f"node={NODE_NAME} site={SITE or '-'} trigger={source} "
                         f"tag={TRIGGER_TAG or '-'} plc={PLC_TYPE} "
                         f"frames={len(clip)} measured_fps={fps:.3f} "
                         f"mux_fps={mux_fps} "
@@ -1416,7 +1476,8 @@ if __name__ == "__main__":
         for warn in config_warnings():
             print(f"  ! {warn}")
         print(f"{C.get('_path')}: OK")
-        print(f"  node   : {NODE_NAME}")
+        print(f"  node   : {CLIP_ID}"
+              + (f"   (site={SITE} node={NODE_NAME})" if SITE else ""))
         print(f"  plc    : {PLC_TYPE} {PLC_PATH} tag {TRIGGER_TAG} @ {POLL_HZ} Hz"
               if PLC_TRIGGER else "  plc    : disabled")
         print(f"  camera : {CAMERA_DEVICE} {FRAME_WIDTH}x{FRAME_HEIGHT} @ {FPS}")

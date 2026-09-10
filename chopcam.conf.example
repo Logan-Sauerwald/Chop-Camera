@@ -11,6 +11,17 @@
 #   /opt/chopcam/venv/bin/python /opt/chopcam/src/capture.py --check-config
 # ---------------------------------------------------------------------------
 
+# Install identity -- the machine/line this aggregator+cameras set serves,
+# e.g. "line3", "sl3", "winder". EVERY PI AT ONE INSTALL SHARES THIS; only the
+# per-node values below differ. That is what makes a per-install conf template
+# work: copy it to each Pi and change NODE_NAME, PLC_PATH, TRIGGER_TAG and
+# NODE_IP, nothing else.
+#
+# Clips are labelled "<SITE>-<NODE_NAME>", so setting it makes names unique
+# plant-wide and stops "chop1" meaning five different cameras. Leave blank and
+# clips are labelled by NODE_NAME alone.
+SITE=""
+
 # REQUIRED. Identifies this node in every clip filename and in the clip's
 # embedded metadata. Examples: "chop1", "uw3".
 #
@@ -23,6 +34,18 @@
 # nobody can trace back to a chop point, and there is no way to tell after the
 # fact.
 NODE_NAME=""
+
+# --- this node's own network ------------------------------------------------
+# Applied by install.sh via NetworkManager. Leave NODE_IP blank to manage
+# networking yourself and install.sh will not touch it.
+#
+# Every install is on its own subnet -- one machine may be 10.2.4.x while
+# another is 192.168.0.x -- so these are per-node values like the PLC address.
+# The wired port carries the controls network; ipv4.never-default keeps Wi-Fi
+# as the default route so SSH and internet still work.
+NODE_IP=""              # e.g. "192.168.0.101"
+NODE_CIDR="24"
+NODE_INTERFACE=""       # blank = autodetect the wired connection
 
 # --- PLC trigger ------------------------------------------------------------
 PLC_TRIGGER="true"
@@ -138,21 +161,6 @@ MODBUS_PORT="5020"
 # journal: every coil write is logged with the PDU address it arrived on.
 MODBUS_TRIGGER_PDU="0"
 
-# PLC-PUSHED TRIGGERS (instead of this Pi polling the PLC)
-# If a machine's PLC writes the trigger TO this Pi rather than the Pi reading
-# it, set PLC_TRIGGER="false" and make this server the real trigger:
-#     MODBUS_TEST_TRIGGER="true"
-#     MODBUS_BIND_IP="0.0.0.0"
-#     MODBUS_PORT="502"          # the standard Modbus TCP port
-# Port 502 is privileged and this service does not run as root, so also
-# uncomment AmbientCapabilities=CAP_NET_BIND_SERVICE in chopcam.service.
-# The trigger is edge-driven, not polled: pymodbus calls into the datastore the
-# instant the PLC writes, so a momentary pulse cannot be missed. The coil is
-# reset to 0 immediately as a handshake acknowledgement -- if the PLC ladder
-# expects the bit to stay high until acknowledged elsewhere, use a second coil
-# for the ack rather than resetting this one.
-# With PLC_TRIGGER="false" a Modbus bind failure is fatal to node health and
-# /healthz says so, because nothing else can start a recording.
 
 # --- camera -----------------------------------------------------------------
 # 1920x1080 @ 120 is a CROPPED sensor readout on this module -- narrower field
@@ -169,6 +177,35 @@ CAMERA_DEVICE="/dev/video0"
 FRAME_WIDTH="1920"
 FRAME_HEIGHT="1080"
 FPS="120"
+
+# v4l2 controls pinned before ffmpeg opens the camera, as name=value pairs.
+# Re-applied on every capture restart, since UVC controls do not reliably
+# survive the device being reopened. Blank leaves the camera on its defaults.
+#
+# THIS IS A PER-INSTALL SETTING because it depends on lighting at that camera.
+# It also decides whether you really get 120 fps: the module ships with
+# auto-exposure on and a default exposure of 15.6 ms, but 120 fps allows only
+# 8.33 ms per frame. Exposure cannot exceed the frame period, so in anything
+# less than bright light the camera quietly drops to ~64 fps -- and the frames
+# it does deliver smear 15 ms of blade travel, which is exactly the detail the
+# system exists to capture. Pin exposure short and add light.
+#
+# A sensible starting point for a lit chop point (60 Hz mains):
+#   CAMERA_CONTROLS="auto_exposure=1,exposure_time_absolute=40,focus_automatic_continuous=0,white_balance_automatic=0,backlight_compensation=0,power_line_frequency=2"
+#
+#   auto_exposure=1                 manual (3 = auto; must come first, the
+#                                   exposure control is inactive until then)
+#   exposure_time_absolute=40       units are 100 us, so 40 = 4 ms. Must be
+#                                   below 83 (8.3 ms) to sustain 120 fps;
+#                                   lower is sharper but darker.
+#   focus_automatic_continuous=0    stop autofocus hunting mid-chop
+#   white_balance_automatic=0       keep colour consistent across nodes
+#   backlight_compensation=0        it works by lengthening exposure
+#   power_line_frequency=2          2 = 60 Hz (1 = 50 Hz, 0 = disabled).
+#                                   Set 0 if anti-flicker limits exposure.
+#
+# List what this camera supports:  v4l2-ctl -d /dev/video0 --list-ctrls
+CAMERA_CONTROLS=""
 
 # --- live preview -----------------------------------------------------------
 # Serves the preview page at /, the MJPEG stream at /stream, and node health as
@@ -233,15 +270,27 @@ PLAYBACK_MODE="realtime"
 # "true"  = push to the aggregator automatically.
 SHIP_ENABLED="false"
 
-# REQUIRED when SHIP_ENABLED="true"; ignored otherwise. Each machine has its
+# REQUIRED when SHIP_ENABLED="true"; ignored otherwise. Each install has its
 # own aggregator on its own subnet, so these are per-setup, not plant-wide.
-# Forward slashes work for both a Windows scp target and a Linux one.
-#   AGG_USER="lsauerwald"
-#   AGG_IP="10.2.4.200"
-#   AGG_DIR="C:/Users/lsauerwald/Downloads/Chop_vids"
+#   AGG_USER="chopcam"
+#   AGG_IP="192.168.0.200"
+#   AGG_DIR="/srv/chopcam/incoming"
 AGG_USER=""
 AGG_IP=""
 AGG_DIR=""
+
+# Which command set the aggregator understands. The aggregator is a Pi 5
+# running Pi OS, so "linux" is right; "windows" is for a PowerShell host.
+#
+# Getting this wrong is not a loud failure. The upload still succeeds, but the
+# verify command returns nothing, the clip is never marked delivered, and the
+# SAME clip re-ships every timer run forever -- duplicates piling up on the
+# aggregator while the node's encoded/ never drains. postprocess.sh names
+# AGG_OS in the log when it sees that signature.
+AGG_OS="linux"
+
+# SSH port on the aggregator. 22 unless the plant uses something else.
+AGG_PORT="22"
 
 # How delivery is confirmed before the local copy is set aside:
 #   hash - SHA-256 compared on both ends (strongest)

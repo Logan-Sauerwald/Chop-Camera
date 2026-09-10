@@ -43,6 +43,8 @@ SHIP_ENABLED="${SHIP_ENABLED:-false}"
 AGG_HOST="${AGG_USER:-user}@${AGG_IP:-127.0.0.1}"
 AGG_DIR="${AGG_DIR:-/tmp}"
 VERIFY_MODE="${VERIFY_MODE:-hash}"
+AGG_OS="${AGG_OS:-linux}"
+AGG_PORT="${AGG_PORT:-22}"
 LOCAL_RETENTION_DAYS="${LOCAL_RETENTION_DAYS:-3}"
 DISK_PCT_LIMIT="${DISK_PCT_LIMIT:-85}"
 CRF="${CRF:-23}"
@@ -62,7 +64,10 @@ if ! flock -n 9; then
     exit 0
 fi
 
-SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new)
+# ssh takes -p for the port, scp takes -P, so they need separate arrays.
+_SSH_COMMON=(-o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new)
+SSH_OPTS=("${_SSH_COMMON[@]}" -p "$AGG_PORT")
+SCP_OPTS=("${_SSH_COMMON[@]}" -P "$AGG_PORT")
 
 # Count video packets: more reliable than nb_frames, which MJPEG often omits.
 frame_count() {
@@ -144,34 +149,75 @@ done
 # STAGE 2 -- ship to aggregator, verify, retain locally
 # ---------------------------------------------------------------------------
 
-# Remote helpers assume a WINDOWS aggregator (PowerShell). For a Linux
-# aggregator swap these for sha256sum / stat -c%s.
+# Remote helpers. AGG_OS selects the command set: the aggregator is a Pi 5
+# running Pi OS, so "linux" is the default. "windows" is kept for a PowerShell
+# aggregator, where the quoting through ssh -> cmd -> powershell is finicky.
+#
+# Getting this wrong is not a loud failure: scp still succeeds, verification
+# comes back empty, the clip is never marked delivered, and the SAME clip is
+# re-shipped every timer run forever -- filling the aggregator with duplicates
+# while the node's encoded/ never drains.
+
+# Single-quote a string for safe interpolation into a remote shell command.
+shq() { printf "'%s'" "${1//\'/\'\\\'\'}"; }
+
 remote_hash() {
-    ssh "${SSH_OPTS[@]}" "$AGG_HOST" \
-        "powershell -NoProfile -Command \"(Get-FileHash -Algorithm SHA256 -LiteralPath '$1').Hash\"" \
-        2>/dev/null | tr -d '\r\n' | tr '[:upper:]' '[:lower:]'
+    case "$AGG_OS" in
+        windows)
+            ssh "${SSH_OPTS[@]}" "$AGG_HOST" \
+                "powershell -NoProfile -Command \"(Get-FileHash -Algorithm SHA256 -LiteralPath '$1').Hash\"" \
+                2>/dev/null | tr -d '\r\n' | tr '[:upper:]' '[:lower:]'
+            ;;
+        *)
+            ssh "${SSH_OPTS[@]}" "$AGG_HOST" \
+                "sha256sum -- $(shq "$1")" \
+                2>/dev/null | cut -d' ' -f1 | tr -d '\r\n' | tr '[:upper:]' '[:lower:]'
+            ;;
+    esac
 }
 
 remote_size() {
-    ssh "${SSH_OPTS[@]}" "$AGG_HOST" \
-        "powershell -NoProfile -Command \"(Get-Item -LiteralPath '$1').Length\"" \
-        2>/dev/null | tr -dc '0-9'
+    case "$AGG_OS" in
+        windows)
+            ssh "${SSH_OPTS[@]}" "$AGG_HOST" \
+                "powershell -NoProfile -Command \"(Get-Item -LiteralPath '$1').Length\"" \
+                2>/dev/null | tr -dc '0-9'
+            ;;
+        *)
+            ssh "${SSH_OPTS[@]}" "$AGG_HOST" \
+                "stat -c%s -- $(shq "$1")" \
+                2>/dev/null | tr -dc '0-9'
+            ;;
+    esac
+}
+
+remote_mkdir() {
+    case "$AGG_OS" in
+        windows)
+            ssh "${SSH_OPTS[@]}" "$AGG_HOST" \
+                "powershell -NoProfile -Command \"New-Item -ItemType Directory -Force -Path '$AGG_DIR' | Out-Null\"" \
+                >/dev/null 2>&1
+            ;;
+        *)
+            ssh "${SSH_OPTS[@]}" "$AGG_HOST" \
+                "mkdir -p -- $(shq "$AGG_DIR")" \
+                >/dev/null 2>&1
+            ;;
+    esac
 }
 
 if [[ "$SHIP_ENABLED" != "true" ]]; then
     pending="$(ls -1 "$ENC_DIR"/*.mp4 2>/dev/null | wc -l)"
     log "auto-transfer off; $pending H.264 clip(s) waiting in $ENC_DIR"
 
-elif ssh "${SSH_OPTS[@]}" "$AGG_HOST" \
-      "powershell -NoProfile -Command \"New-Item -ItemType Directory -Force -Path '$AGG_DIR' | Out-Null\"" \
-      >/dev/null 2>&1; then
+elif remote_mkdir; then
 
     for clip in "$ENC_DIR"/*.mp4; do
         base="$(basename "$clip")"
         remote="$AGG_DIR/$base"
 
         log "shipping $base"
-        if ! scp -q "${SSH_OPTS[@]}" "$clip" "$AGG_HOST:$remote" 2>/dev/null; then
+        if ! scp -q "${SCP_OPTS[@]}" "$clip" "$AGG_HOST:$remote" 2>/dev/null; then
             log "transfer failed for $base -- will retry next run"
             continue
         fi
@@ -180,18 +226,25 @@ elif ssh "${SSH_OPTS[@]}" "$AGG_HOST" \
         # the far end truncated the file (out of disk), and since we delete the
         # local copy afterwards a false success would lose footage for good.
         ok=0
+        blank=0          # remote command returned nothing at all
         case "$VERIFY_MODE" in
             hash)
                 lsum="$(sha256sum "$clip" | cut -d' ' -f1)"
                 rsum="$(remote_hash "$remote")"
-                if [[ -n "$rsum" && "$lsum" == "$rsum" ]]; then ok=1
-                else log "hash check failed for $base (remote='${rsum:-empty}')"; fi
+                if [[ -z "$rsum" ]]; then
+                    blank=1; log "hash check got no answer for $base"
+                elif [[ "$lsum" == "$rsum" ]]; then ok=1
+                else log "hash MISMATCH for $base -- the copy on the aggregator" \
+                        "differs from the local file (truncated or corrupt)"; fi
                 ;;
             size)
                 lsz="$(stat -c%s "$clip")"
                 rsz="$(remote_size "$remote")"
-                if [[ -n "$rsz" && "$lsz" == "$rsz" ]]; then ok=1
-                else log "size check failed for $base (local=$lsz remote='${rsz:-empty}')"; fi
+                if [[ -z "$rsz" ]]; then
+                    blank=1; log "size check got no answer for $base"
+                elif [[ "$lsz" == "$rsz" ]]; then ok=1
+                else log "size MISMATCH for $base (local=$lsz remote=$rsz)" \
+                        "-- the copy on the aggregator is incomplete"; fi
                 ;;
             none) ok=1 ;;
         esac
@@ -201,10 +254,21 @@ elif ssh "${SSH_OPTS[@]}" "$AGG_HOST" \
             log "delivered $base (verified: $VERIFY_MODE)"
         else
             log "KEEPING local copy of $base -- will retry next run"
+            if [[ "$blank" -eq 1 ]]; then
+                log "  The verify command returned nothing, which usually means"
+                log "  AGG_OS=\"$AGG_OS\" is wrong for this aggregator (a Pi 5"
+                log "  running Pi OS is \"linux\"). Until it matches, the copy"
+                log "  lands but cannot be read back, so this clip re-ships"
+                log "  every run. VERIFY_MODE=\"size\" is the fallback."
+            fi
         fi
     done
 else
-    log "aggregator unreachable ($AGG_HOST) -- clips held locally for retry"
+    log "aggregator unreachable ($AGG_HOST:$AGG_PORT) -- clips held locally"
+    log "  Either the host is down, key auth is not set up, or AGG_OS=\"$AGG_OS\""
+    log "  is wrong: preparing the destination folder uses OS-specific commands,"
+    log "  so a Pi 5 aggregator configured as \"windows\" fails here too."
+    log "  Check with:  ssh -p $AGG_PORT $AGG_HOST true"
 fi
 
 # ---------------------------------------------------------------------------
