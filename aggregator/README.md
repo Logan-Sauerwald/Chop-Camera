@@ -54,7 +54,7 @@ Adding or removing cameras at an install is one line — `NODES` — and a
 restart. Nothing else changes.
 
 ```
-NODES="uw1=192.168.0.101 uw2=192.168.0.102 uw3=192.168.0.103 uw4=192.168.0.104"
+NODES="uw1=198.51.100.101 uw2=198.51.100.102 uw3=198.51.100.103 uw4=198.51.100.104"
 ```
 
 ## Letting the nodes deliver

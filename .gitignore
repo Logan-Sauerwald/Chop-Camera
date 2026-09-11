@@ -15,3 +15,6 @@ chopcam.conf
 venv/
 __pycache__/
 *.pyc
+
+# The real per-node address and tag record, kept out of the repository.
+docs/deployments.local.md

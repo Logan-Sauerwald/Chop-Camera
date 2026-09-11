@@ -367,7 +367,7 @@ _NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
 # Addresses that appear in the shipped documentation. Finding one in a live
 # config usually means it was copied and not edited.
-_PLACEHOLDER_HOSTS = {"10.2.4.1", "192.168.0.1", "127.0.0.1"}
+_PLACEHOLDER_HOSTS = {"192.0.2.10", "198.51.100.11", "127.0.0.1"}
 
 
 def validate_config():
@@ -736,7 +736,7 @@ def test_trigger(duration=30.0):
         print("If the PLC isn't connected yet, this is expected. If it is:")
         print("  - check `ping " + str(PLC_PATH).split('/')[0] + "`")
         print("  - ControlLogix: a chassis needs the CPU slot, "
-              "e.g. PLC_PATH=\"10.2.4.1/1\"")
+              "e.g. PLC_PATH=\"192.0.2.10/1\"")
         print("  - ControlLogix: confirm the tag name with --list-tags")
         print("  - Siemens: check SIEMENS_RACK/SIEMENS_SLOT (S7-1200/1500 are "
               "usually 0/1, S7-300/400 are 0/2), that PUT/GET communication is")
@@ -827,7 +827,7 @@ def list_tags(substr=""):
         print(f"Could not reach PLC at {PLC_PATH}: {exc}")
         print("If the PLC isn't connected yet, this is expected.")
         print("If it is: check `ping`, and try a chassis slot path "
-              "like \"10.2.4.1/1\" in PLC_PATH.")
+              "like \"192.0.2.10/1\" in PLC_PATH.")
         return 1
 
 

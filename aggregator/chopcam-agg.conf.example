@@ -19,7 +19,7 @@ SITE=""
 # The number of nodes varies per install -- add or remove entries, nothing else
 # changes.
 #
-#   NODES="uw1=192.168.0.101 uw2=192.168.0.102 uw3=192.168.0.103 uw4=192.168.0.104"
+#   NODES="uw1=198.51.100.101 uw2=198.51.100.102 uw3=198.51.100.103 uw4=198.51.100.104"
 NODES=""
 
 # HTTP port each capture node serves its preview and health on. This is

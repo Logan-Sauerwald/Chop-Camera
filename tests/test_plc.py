@@ -59,7 +59,7 @@ class TestSiemensAddress(unittest.TestCase):
 
     def test_garbage_rejected(self):
         for bad in ("DB100", "Q0", "X0.7", "DB100.DBX0", "0.7",
-                    "_R1_156N0:33:O.7", "DB100.DBW0.7"):
+                    "Local:3:O.Data.7", "DB100.DBW0.7"):
             with self.assertRaises(ValueError, msg=bad):
                 parse_siemens_address(bad)
 
@@ -67,14 +67,14 @@ class TestSiemensAddress(unittest.TestCase):
         # Guards the most likely commissioning mistake: right tag, wrong
         # PLC_TYPE. This must fail loudly rather than parse into nonsense.
         with self.assertRaises(ValueError):
-            parse_siemens_address("_R1_156N0:33:O.7")
+            parse_siemens_address("Local:3:O.Data.7")
 
 
 class TestFactory(unittest.TestCase):
 
     def _cfg(self, **kw):
-        base = {"PLC_TYPE": "controllogix", "PLC_PATH": "10.2.4.1",
-                "TRIGGER_TAG": "_R1_156N0:33:O.7"}
+        base = {"PLC_TYPE": "controllogix", "PLC_PATH": "192.0.2.10",
+                "TRIGGER_TAG": "Local:3:O.Data.7"}
         base.update(kw)
         return base
 
@@ -139,7 +139,7 @@ class TestFactory(unittest.TestCase):
 
     def test_labels_are_populated(self):
         logix = make_trigger_source(self._cfg())
-        self.assertIn("_R1_156N0:33:O.7", logix.label)
+        self.assertIn("Local:3:O.Data.7", logix.label)
         siemens = make_trigger_source(self._cfg(PLC_TYPE="siemens",
                                                 TRIGGER_TAG="DB100.DBX0.7"))
         self.assertIn("DB100.DBX0.7", siemens.label)

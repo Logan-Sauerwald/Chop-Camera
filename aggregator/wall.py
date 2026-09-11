@@ -134,7 +134,7 @@ def parse_nodes(raw):
         if "=" not in token:
             raise ValueError(
                 f"NODES entry {token!r} is not name=address "
-                '(e.g. NODES="uw1=192.168.0.101 uw2=192.168.0.102")')
+                '(e.g. NODES="uw1=198.51.100.101 uw2=198.51.100.102")')
         name, _, addr = token.partition("=")
         name, addr = name.strip(), addr.strip()
         if not name or not addr:
@@ -821,7 +821,7 @@ _PAGE = """<!doctype html>
   <div class="empty" id="empty" hidden>
     No nodes configured. Set <code>NODES</code> in
     <code>/etc/chopcam-agg.conf</code>, for example
-    <code>NODES="uw1=192.168.0.101 uw2=192.168.0.102"</code>, then
+    <code>NODES="uw1=198.51.100.101 uw2=198.51.100.102"</code>, then
     <code>sudo systemctl restart chopcam-wall</code>.
   </div>
 
@@ -1889,7 +1889,7 @@ def validate_config():
     if not NODES:
         problems.append(
             'NODES is empty -- nothing to display. Set it to the capture nodes '
-            'at this install, e.g. NODES="uw1=192.168.0.101 uw2=192.168.0.102"')
+            'at this install, e.g. NODES="uw1=198.51.100.101 uw2=198.51.100.102"')
     if not SITE:
         problems.append(
             "SITE is not set. It must match SITE on this install's capture "

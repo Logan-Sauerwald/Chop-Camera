@@ -157,13 +157,13 @@ class LogixSource(TriggerSource):
 
     `path` is the controller address. If the Ethernet port is on the CPU itself
     a plain IP works; with a separate 1756-EN2T module append the CPU slot,
-    e.g. "10.2.4.1/1".
+    e.g. "192.0.2.10/1".
     """
 
     def __init__(self, path, tag):
         if not str(path or "").strip():
             raise ValueError("PLC_PATH is empty -- set the controller IP, "
-                             "e.g. \"10.2.4.1\" (add \"/1\" for the CPU slot "
+                             "e.g. \"192.0.2.10\" (add \"/1\" for the CPU slot "
                              "in a chassis).")
         if not str(tag or "").strip():
             raise ValueError(
@@ -268,7 +268,7 @@ class SiemensSource(TriggerSource):
 
     def __init__(self, ip, rack, slot, address, port=102):
         if not str(ip or "").strip():
-            raise ValueError("PLC_PATH is empty -- set the CPU IP, e.g. \"10.2.4.1\".")
+            raise ValueError("PLC_PATH is empty -- set the CPU IP, e.g. \"192.0.2.10\".")
         try:
             self.rack = int(rack)
             self.slot = int(slot)
