@@ -16,5 +16,7 @@ venv/
 __pycache__/
 *.pyc
 
-# The real per-node address and tag record, kept out of the repository.
+# A local record of what each node points at -- PLC addresses and trigger
+# tags. Deliberately never committed: this repository is public, and those
+# columns together say which bit fires which knife on which network.
 docs/deployments.local.md

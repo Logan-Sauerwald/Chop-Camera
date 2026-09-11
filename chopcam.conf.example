@@ -95,8 +95,8 @@ PLC_PATH=""
 TRIGGER_TAG=""
 
 # --- worked examples --------------------------------------------------------
-# Real deployments, for reference. See docs/deployments.md for the full
-# per-machine tables. Copy the SHAPE, never the values.
+# Two machine shapes, to show how the fields go together. The values are
+# illustrative, not defaults -- copy the SHAPE, never the values.
 #
 # Allen-Bradley line -- one PLC, an output bit per chop point:
 #     PLC_TYPE="controllogix"

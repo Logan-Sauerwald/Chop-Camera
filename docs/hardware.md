@@ -161,8 +161,7 @@ more than one camera per Pi.
 **Addresses are per machine, not plant-wide.** Every camera+aggregator setup
 around the plant sits on its own controls network — one line may be `192.0.2.x`
 while another is `198.51.100.x` — and on some machines each chop point has its
-own PLC. `docs/deployments.md` shows the shape of the record to keep; the table
-below is one line's layout as an example.
+own PLC. The table below is one line's layout, as an example of the shape.
 
 Addresses here are RFC 5737 documentation addresses, not defaults and not any
 real machine's. Substitute your own.

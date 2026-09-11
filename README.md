@@ -88,7 +88,7 @@ drift apart on how a value is spelled or how a clip is named.
 
 An install is one aggregator plus however many nodes that machine needs.
 Adding a camera is a new node config plus one entry in the aggregator's
-`NODES`. See `aggregator/README.md` and `docs/deployments.md`.
+`NODES`. See `aggregator/README.md`.
 
 ## Layout
 
@@ -102,7 +102,6 @@ systemd/               service + timer units
 aggregator/            the aggregator half — wall, player, chop log, retention
 tests/                 unit tests — run with no PLC and no camera attached
 docs/hardware.md       parts, measurements, camera modes, exposure tuning
-docs/deployments.md    per-machine node tables — what each node talks to
 docs/wall-layouts.md   the wall, the player and the chop log, with screenshots
 HANDOFF.md             design reasoning and open items — read this
 INSTALL.md             step-by-step deployment

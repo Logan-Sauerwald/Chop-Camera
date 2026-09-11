@@ -32,7 +32,11 @@ a trip:
       Security. Without it the connection succeeds and every read fails, which
       looks like a wrong address. Changing it may need a download to the CPU.
 
-Record them in [`deployments.md`](docs/deployments.md) as you go.
+Keep a record of what each node ends up pointing at, so a year from now
+something says which PLC it was ever supposed to be talking to. Keep it
+wherever your site keeps controls documentation rather than in this
+repository: an address next to its trigger tag says which bit fires which
+knife on which network.
 
 ---
 
