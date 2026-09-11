@@ -96,7 +96,7 @@ account can run `sha256sum` on `INCOMING_DIR`), while a verify returning a
 
 | Path | What |
 |---|---|
-| `/` | the wall — live tiles, one per node, each with **Last chop** and **Older** |
+| `/` | the wall — live tiles, one per node, each with a **Last chop** button |
 | `/log` | the same page with the chop log open; bookmarkable, and it starts no live streams |
 | `/clip/<file>` | play a clip (Range-capable, so the player can seek) |
 | `/clip/<file>?slowmo=1` | download a 4× slow-motion copy |
@@ -126,9 +126,10 @@ still comes straight from the nodes.
 
 ## Watching a chop
 
-Each tile carries two buttons: **Last chop**, showing that camera's most recent
-clip and its age, and **Older**, which opens the same player with the camera's
-clip list beside it. Either fills the screen, playing at **0.25×**.
+Each tile carries one button, showing that camera's most recent clip and its
+age. Click it and the clip fills the screen, playing at **0.25×**. Older clips
+from that camera are reached from inside the player — the tile bar has to stay
+readable across a room, so it keeps only the button people actually press.
 
 - **Speed** — 0.1× / 0.25× / 0.5× / 1×
 - **Pause** — the button, or the spacebar
@@ -137,7 +138,7 @@ clip list beside it. Either fills the screen, playing at **0.25×**.
 - **Keep this clip** — the button, or `k`
 - **Back to live** — the button, or Esc
 - **Download slow motion** — a 4× slow copy that plays slowly in *any* player
-- **Original speed** — the true-speed file
+- **Download original speed** — the true-speed file
 
 The bar under the video is the player's own rather than the browser's, so the
 **trigger instant can be marked on it** — the red `CHOP` line — and the readout
@@ -160,9 +161,10 @@ starts them at all.
 
 ### Older clips
 
-**Older** lists that camera's delivered clips newest first, each with its date
-and time, its age, its size, and a star if it is kept. Clicking one loads it
-without leaving the player. It is fed by `/clips?node=<name>`.
+**Older clips**, in the player's top bar, lists that camera's delivered clips
+newest first, each with its date and time, its age, its size, and a star if it
+is kept; the button carries the count. Clicking a row loads that clip without
+leaving the player. It is fed by `/clips?node=<name>`.
 
 ### The button's states
 

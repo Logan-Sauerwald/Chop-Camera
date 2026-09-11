@@ -869,7 +869,7 @@ _PAGE = """<!doctype html>
       <span id="pspacer2" style="flex:1 1 auto"></span>
       <button class="keep" id="pkeep" type="button">Keep this clip</button>
       <a class="dl primary" id="pdlslow" href="#">Download slow motion</a>
-      <a class="dl" id="pdlorig" href="#">Original speed</a>
+      <a class="dl" id="pdlorig" href="#">Download original speed</a>
     </div>
   </div>
 %(html)s
@@ -896,14 +896,13 @@ function tile(n) {
     '<div class="badge"></div>' +
     '<div class="bar"><span class="name"></span>' +
     '<span class="meta"></span>' +
-    '<button class="chop" type="button"></button>' +
-    '<button class="browse" type="button" title="Browse older clips from ' +
-    'this camera">Older</button></div>';
+    '<button class="chop" type="button"></button></div>';
   el.querySelector('.name').textContent = n.clip_id;
+  // One button per tile, deliberately. Older clips are reachable from inside
+  // the player, where you already are once you have opened one -- a second
+  // button here would crowd a bar that has to be readable across a room.
   el.querySelector('.chop').addEventListener('click',
     () => openPlayer(n.name));
-  el.querySelector('.browse').addEventListener('click',
-    () => openPlayer(n.name, null, true));
   // An overlay holds the streams stopped, and tiles are built on the first
   // status poll -- which for /log lands AFTER the log has opened. Starting
   // the stream here would open an MJPEG connection per camera that nothing is
@@ -1009,9 +1008,6 @@ function render(s) {
     }
     el.querySelector('.meta').textContent = meta.join('  \u00b7  ');
     updateChopButton(el.querySelector('.chop'), n);
-    const browse = el.querySelector('.browse');
-    browse.textContent = n.clips_here ? 'Older \u00b7 ' + n.clips_here : 'Older';
-    browse.disabled = !n.clips_here;
 
     const img = el.querySelector('img');
     let down = el.querySelector('.down');
@@ -1052,21 +1048,13 @@ setInterval(refresh, %(poll_ms)d);
 
 
 _CSS = r"""
-  /* ---- added features: browse, keep, timeline, chop log ---------------- */
+  /* ---- added features: keep, timeline, clip list, chop log ------------- */
   #hspacer { flex:1 1 auto; }
   .nav { border:1px solid #3a434e; background:#1b2027; color:#e8ecf1;
          font:600 12px/1 inherit; padding:6px 11px; border-radius:5px;
          cursor:pointer; }
   .nav:hover { background:#273040; border-color:#4d5a6b; }
   .nav.on { background:#2f4f6f; border-color:#3d6288; }
-
-  /* Second tile button: deliberately quieter than "Last chop", which is the
-     one anyone standing at the wall actually presses. */
-  .browse { flex:0 0 auto; border:1px solid #3a434e; background:#161a20;
-            color:#b6bfca; font:600 12px/1 inherit; padding:7px 9px;
-            border-radius:5px; cursor:pointer; white-space:nowrap; }
-  .browse:hover:not(:disabled) { background:#273040; color:#e8ecf1; }
-  .browse:disabled { opacity:.35; cursor:default; }
 
   .kept { background:#5b45a0; color:#fff; padding:3px 9px; border-radius:99px;
           font-size:11px; font-weight:700; letter-spacing:.05em;
@@ -1439,6 +1427,9 @@ async function loadList(name) {
 function renderList(name) {
   const clips = listCache[name];
   if (!clips) return;                  // loadList is still on its way
+  // The only way into the list, so it says how much is behind it.
+  document.getElementById('plistbtn').textContent =
+    clips.length > 1 ? 'Older clips \u00b7 ' + (clips.length - 1) : 'Older clips';
   const rows = document.getElementById('plistrows');
   document.querySelector('#plist .lhead').textContent =
     clips.length + (clips.length === 1 ? ' clip from ' : ' clips from ') +
@@ -1493,20 +1484,22 @@ function loadClip(name, c) {
   renderList(name);
 }
 
-function openPlayer(name, file, showList) {
+function openPlayer(name, file) {
   const n = nodes[name];
   if (!n) return;
   // Metadata for the newest clip is already in the status snapshot; for any
   // other file it comes from the row that was clicked.
   const last = !file || file === n.last_clip_file;
   file = file || n.last_clip_file;
-  if (!file && !showList) return;
+  if (!file) return;
   playing = name;
   closeLog();
   stopLiveStreams(true);
+  // The list starts closed and is opened by the Older clips button: the point
+  // of the player is the clip, and the panel takes a fifth of the screen.
   const panel = document.getElementById('plist');
-  panel.hidden = !showList;
-  document.getElementById('plistbtn').classList.toggle('on', !!showList);
+  panel.hidden = true;
+  document.getElementById('plistbtn').classList.remove('on');
   document.getElementById('player').hidden = false;
   if (file)
     loadClip(name, {file: file,

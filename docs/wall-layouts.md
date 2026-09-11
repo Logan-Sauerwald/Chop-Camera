@@ -97,9 +97,10 @@ cameras will run into.
 
 ## Watching a chop
 
-Every tile carries two buttons. **Last chop** shows that camera's most recent
-clip and its age; **Older** opens the same player with the camera's clip list
-alongside. Either fills the screen and plays at **0.25x**.
+Every tile carries one button, showing that camera's most recent clip and its
+age. Click it and the clip fills the screen, playing at **0.25x**. That camera's
+older clips are one more click away once you are in there — the tile bar has to
+stay readable from across a room, so it holds the button people actually press.
 
 ![The clip player, playing at quarter speed](images/player-01-playing.jpg)
 
@@ -114,7 +115,7 @@ Along the bottom:
 | **Jump to chop** | seeks to just before the trigger instant; `c` does the same |
 | **Keep this clip** | moves it where the purge cannot delete it; `k` does the same |
 | **Download slow motion** | a 4x slow copy that plays slowly in *any* player |
-| **Original speed** | the true-speed file |
+| **Download original speed** | the true-speed file |
 | **Back to live** (or Esc) | returns to the wall |
 
 Arrow keys seek a second at a time.
@@ -142,9 +143,10 @@ and it is the fallback for a node the aggregator has not reached yet.
 
 ### Older clips
 
-**Older** lists that camera's delivered clips, newest first, with the date and
-time of each, how long ago it was, its size, and a star if it is kept. Clicking
-one loads it without leaving the player.
+**Older clips**, in the player's top bar, lists that camera's delivered clips
+newest first — the date and time of each, how long ago it was, its size, and a
+star if it is kept. The button carries the count. Clicking a row loads that clip
+without leaving the player.
 
 ![The player with the camera's clip list open](images/player-03-older-clips.jpg)
 
