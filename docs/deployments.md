@@ -52,7 +52,7 @@ One ControlLogix serving five chop points; only the tag changes per node.
 
 | Node | Position | `PLC_TYPE` | `PLC_PATH` | `TRIGGER_TAG` | Node IP |
 |---|---|---|---|---|---|
-| chop1 | chop point 1 | `controllogix` | `192.0.2.10` | `_R1_156N0:33:O.7` | 192.0.2.100 |
+| chop1 | chop point 1 | `controllogix` | `192.0.2.10` | `Local:3:O.Data.7` | 192.0.2.100 |
 | chop2 | chop point 2 | `controllogix` | `192.0.2.10` | *(confirm)* | 192.0.2.101 |
 | chop3 | chop point 3 | `controllogix` | `192.0.2.10` | *(confirm)* | 192.0.2.102 |
 | chop4 | chop point 4 | `controllogix` | `192.0.2.10` | *(confirm)* | 192.0.2.103 |
@@ -64,7 +64,7 @@ Rockwell output tags are frequently `...:O.Data.7` rather than `...:O.7`, or an
 alias — do not guess, list them:
 
 ```bash
-/opt/chopcam/venv/bin/python /opt/chopcam/src/capture.py --list-tags 156N0
+/opt/chopcam/venv/bin/python /opt/chopcam/src/capture.py --list-tags Local
 ```
 
 If connect times out but ping works, the CPU is in a chassis and `PLC_PATH`
@@ -79,10 +79,10 @@ node. Trigger bits are merkers (`M`), not outputs.
 
 | Node | Position | `PLC_TYPE` | `PLC_PATH` | `TRIGGER_TAG` | Signal |
 |---|---|---|---|---|---|
-| uw1 | UW 1 splice knife | `siemens` | `198.51.100.11` | `M158.7` | splice knife fire |
-| uw2 | UW 2 splice knife | `siemens` | `198.51.100.12` | `M143.5` | splice knife fire |
-| uw3 | UW 3 splice knife | `siemens` | `198.51.100.13` | `M155.6` | splice knife fire |
-| uw4 | UW 4 splice knife | `siemens` | `198.51.100.14` | `M148.7` | splice knife fire |
+| uw1 | UW 1 splice knife | `siemens` | `198.51.100.11` | `M10.0` | splice knife fire |
+| uw2 | UW 2 splice knife | `siemens` | `198.51.100.12` | `M11.5` | splice knife fire |
+| uw3 | UW 3 splice knife | `siemens` | `198.51.100.13` | `M12.6` | splice knife fire |
+| uw4 | UW 4 splice knife | `siemens` | `198.51.100.14` | `M13.7` | splice knife fire |
 
 Still to confirm on this machine:
 

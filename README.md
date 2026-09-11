@@ -143,7 +143,7 @@ Clone, `sudo ./install.sh`, then change these in `/etc/chopcam.conf`:
 Different lines use different PLCs, so `PLC_TYPE` is per node:
 
 ```
-PLC_TYPE="controllogix"   TRIGGER_TAG="_R1_156N0:33:O.7"
+PLC_TYPE="controllogix"   TRIGGER_TAG="Local:3:O.Data.7"
 PLC_TYPE="siemens"        TRIGGER_TAG="DB100.DBX0.7"   # + SIEMENS_RACK/SLOT
 ```
 

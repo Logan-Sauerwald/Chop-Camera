@@ -147,7 +147,7 @@ class TestValidation(unittest.TestCase):
     def test_controllogix_tag_with_siemens_type_is_fatal(self):
         # The likeliest node-to-node copy mistake: right tag, wrong PLC family.
         res = self._run(CONF.replace('TRIGGER_TAG="DB100.DBX0.7"',
-                                     'TRIGGER_TAG="_R1_156N0:33:O.7"'))
+                                     'TRIGGER_TAG="Local:3:O.Data.7"'))
         self.assertEqual(res.returncode, 1)
 
     def test_unknown_plc_type_is_fatal(self):

@@ -635,7 +635,7 @@ duration exactly 30.000000, zero frames lost.
    transition, and gives a verdict on whether the pulses are wide enough to
    catch. Non-zero exit means marginal or absent.
    - *Siemens:* rack/slot first — connection refused is almost always the wrong
-     slot. Then PUT/GET permission. Merkers (`M158.7`) do **not** need the
+     slot. Then PUT/GET permission. Merkers (`M10.0`) do **not** need the
      "optimized block access" change; that is data blocks only.
    - *ControlLogix:* `--list-tags` first; the real tag may be `...:O.Data.7` or
      an alias. Watch for `reads as DINT, not BOOL` — that means the trigger is

@@ -24,8 +24,8 @@ a trip:
       taken.
 - [ ] **The PLC's IP** for *this* chop point. On some machines every station
       has its own PLC — do not assume one address serves them all.
-- [ ] **The trigger address** — a ControlLogix tag (`_R1_156N0:33:O.7`) or a
-      Siemens address (`M158.7`, `DB100.DBX0.7`, `Q0.7`).
+- [ ] **The trigger address** — a ControlLogix tag (`Local:3:O.Data.7`) or a
+      Siemens address (`M10.0`, `DB100.DBX0.7`, `Q0.7`).
 - [ ] **Siemens only: the CPU family.** S7-1200/1500 use slot 1, S7-300/400 use
       slot 2. A wrong slot presents as connection refused.
 - [ ] **Siemens only: PUT/GET permitted?** CPU properties → Protection &
@@ -76,7 +76,7 @@ Only six fields need changing. Everything else is already right.
 | `NODE_IP` | `"198.51.100.101"` | must be free on the controls subnet |
 | `PLC_TYPE` | `"siemens"` or `"controllogix"` | **ships as `controllogix`** |
 | `PLC_PATH` | `"198.51.100.11"` | *this* chop point's PLC |
-| `TRIGGER_TAG` | `"M158.7"` | the bit to watch |
+| `TRIGGER_TAG` | `"M10.0"` | the bit to watch |
 
 Then check `SIEMENS_SLOT` — `1` for S7-1200/1500, `2` for S7-300/400.
 
@@ -97,7 +97,7 @@ distinguishable.
 ```
 /etc/chopcam.conf: OK
   node   : 110-UW1   (site=110 node=UW1)
-  plc    : siemens 198.51.100.11 tag M158.7 @ 30 Hz
+  plc    : siemens 198.51.100.11 tag M10.0 @ 30 Hz
   camera : /dev/video0 1920x1080 @ 120
   clip   : -15s/+15s -> /var/lib/chopcam/raw
   buffer : 31s window, 620 MB ceiling
@@ -193,7 +193,7 @@ Exit status is non-zero on a marginal or absent trigger, so it can be scripted.
 |---|---|
 | Connection refused | **wrong `SIEMENS_SLOT`** — try `2` (S7-300/400) or `1` (S7-1200/1500) |
 | Connects, every read fails | **PUT/GET not permitted** on the CPU |
-| `Cannot parse Siemens address` | use `M158.7`, `DB100.DBX0.7`, `Q0.7`, `I3.2`; bit must be 0–7 |
+| `Cannot parse Siemens address` | use `M10.0`, `DB100.DBX0.7`, `Q0.7`, `I3.2`; bit must be 0–7 |
 | ControlLogix times out, ping works | CPU is in a chassis: `PLC_PATH="192.0.2.10/1"` |
 | `reads as DINT, not BOOL` | the tag is a word, so the trigger is testing "nonzero" — append the bit index |
 | No rising edge seen | nothing chopped, or the wrong address. ControlLogix: `--list-tags` |

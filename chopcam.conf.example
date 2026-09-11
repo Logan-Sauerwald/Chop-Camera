@@ -77,7 +77,7 @@ PLC_PATH=""
 #
 # ControlLogix -- a tag name. Rockwell output tags are often "...:O.Data.7"
 #   rather than "...:O.7", and may be an alias. Don't guess:
-#       capture.py --list-tags 156N0
+#       capture.py --list-tags Local
 #   and paste the exact string it prints. Point at a single BIT: if the tag
 #   resolves to a DINT the trigger becomes "any nonzero value" and capture.py
 #   logs a warning saying so.
@@ -101,13 +101,13 @@ TRIGGER_TAG=""
 # Allen-Bradley line -- one PLC, an output bit per chop point:
 #     PLC_TYPE="controllogix"
 #     PLC_PATH="192.0.2.10"               # or "192.0.2.10/1" for a chassis slot
-#     TRIGGER_TAG="_R1_156N0:33:O.7"      # confirm with --list-tags
+#     TRIGGER_TAG="Local:3:O.Data.7"      # confirm with --list-tags
 #
 # Siemens unwinder line -- a SEPARATE PLC per station, a merker bit each:
-#     node uw1:  PLC_PATH="198.51.100.11"  TRIGGER_TAG="M158.7"
-#     node uw2:  PLC_PATH="198.51.100.12"  TRIGGER_TAG="M143.5"
-#     node uw3:  PLC_PATH="198.51.100.13"  TRIGGER_TAG="M155.6"
-#     node uw4:  PLC_PATH="198.51.100.14"  TRIGGER_TAG="M148.7"
+#     node uw1:  PLC_PATH="198.51.100.11"  TRIGGER_TAG="M10.0"
+#     node uw2:  PLC_PATH="198.51.100.12"  TRIGGER_TAG="M11.5"
+#     node uw3:  PLC_PATH="198.51.100.13"  TRIGGER_TAG="M12.6"
+#     node uw4:  PLC_PATH="198.51.100.14"  TRIGGER_TAG="M13.7"
 #     PLC_TYPE="siemens"                  # plus SIEMENS_RACK / SIEMENS_SLOT
 #
 # On that Siemens line BOTH values change per node -- there is no shared PLC
