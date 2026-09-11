@@ -73,7 +73,7 @@ class TestSiemensAddress(unittest.TestCase):
 class TestFactory(unittest.TestCase):
 
     def _cfg(self, **kw):
-        base = {"PLC_TYPE": "controllogix", "PLC_PATH": "10.2.4.1",
+        base = {"PLC_TYPE": "controllogix", "PLC_PATH": "192.0.2.10",
                 "TRIGGER_TAG": "_R1_156N0:33:O.7"}
         base.update(kw)
         return base

@@ -4,16 +4,26 @@ One row per capture node. Addresses, tags and even PLC families differ between
 machines, so **nothing here is a default** — `chopcam.conf.example` ships those
 fields blank on purpose, and the service refuses to start until they are set.
 
-Record every node here as it is commissioned. When a node misbehaves a year
-from now, this table is what says which PLC it was ever supposed to be talking
-to.
+Record every node as it is commissioned. When a node misbehaves a year from
+now, that record is what says which PLC it was ever supposed to be talking to.
+
+> **The tables below are worked examples, not a live inventory.** Every address
+> in this repository comes from the ranges RFC 5737 reserves for documentation
+> (`192.0.2.0/24` and `198.51.100.0/24`); none of them is a real machine and
+> none is routable.
+>
+> Keep the real table — addresses, trigger tags, which station is which —
+> wherever your site keeps its controls documentation, not in a public
+> repository. Together those columns say exactly which bit fires which knife on
+> which network, which is worth more to someone than any one of them alone. A
+> copy at `docs/deployments.local.md` is ignored by git.
 
 ## Why per-node, not per-site
 
 Three things vary independently:
 
-- **Subnet.** Each machine's controls network is its own. A `10.2.4.x` address
-  copied onto a `192.168.0.x` machine gives you a node that starts cleanly and
+- **Subnet.** Each machine's controls network is its own. A `192.0.2.x` address
+  copied onto a `198.51.100.x` machine gives you a node that starts cleanly and
   never triggers.
 - **PLC family.** Some lines are Allen-Bradley, some Siemens. `PLC_TYPE` picks
   the driver per node.
@@ -42,13 +52,13 @@ One ControlLogix serving five chop points; only the tag changes per node.
 
 | Node | Position | `PLC_TYPE` | `PLC_PATH` | `TRIGGER_TAG` | Node IP |
 |---|---|---|---|---|---|
-| chop1 | chop point 1 | `controllogix` | `10.2.4.1` | `_R1_156N0:33:O.7` | 10.2.4.100 |
-| chop2 | chop point 2 | `controllogix` | `10.2.4.1` | *(confirm)* | 10.2.4.101 |
-| chop3 | chop point 3 | `controllogix` | `10.2.4.1` | *(confirm)* | 10.2.4.102 |
-| chop4 | chop point 4 | `controllogix` | `10.2.4.1` | *(confirm)* | 10.2.4.103 |
-| chop5 | chop point 5 | `controllogix` | `10.2.4.1` | *(confirm)* | 10.2.4.104 |
+| chop1 | chop point 1 | `controllogix` | `192.0.2.10` | `_R1_156N0:33:O.7` | 192.0.2.100 |
+| chop2 | chop point 2 | `controllogix` | `192.0.2.10` | *(confirm)* | 192.0.2.101 |
+| chop3 | chop point 3 | `controllogix` | `192.0.2.10` | *(confirm)* | 192.0.2.102 |
+| chop4 | chop point 4 | `controllogix` | `192.0.2.10` | *(confirm)* | 192.0.2.103 |
+| chop5 | chop point 5 | `controllogix` | `192.0.2.10` | *(confirm)* | 192.0.2.104 |
 
-Aggregator: `10.2.4.200` (planned).
+Aggregator: `192.0.2.200` (planned).
 
 Rockwell output tags are frequently `...:O.Data.7` rather than `...:O.7`, or an
 alias — do not guess, list them:
@@ -58,7 +68,7 @@ alias — do not guess, list them:
 ```
 
 If connect times out but ping works, the CPU is in a chassis and `PLC_PATH`
-needs the slot: `"10.2.4.1/1"`.
+needs the slot: `"192.0.2.10/1"`.
 
 ---
 
@@ -69,10 +79,10 @@ node. Trigger bits are merkers (`M`), not outputs.
 
 | Node | Position | `PLC_TYPE` | `PLC_PATH` | `TRIGGER_TAG` | Signal |
 |---|---|---|---|---|---|
-| uw1 | UW 1 splice knife | `siemens` | `192.168.0.4` | `M158.7` | splice knife fire |
-| uw2 | UW 2 splice knife | `siemens` | `192.168.0.8` | `M143.5` | splice knife fire |
-| uw3 | UW 3 splice knife | `siemens` | `192.168.0.13` | `M155.6` | splice knife fire |
-| uw4 | UW 4 splice knife | `siemens` | `192.168.0.14` | `M148.7` | splice knife fire |
+| uw1 | UW 1 splice knife | `siemens` | `198.51.100.11` | `M158.7` | splice knife fire |
+| uw2 | UW 2 splice knife | `siemens` | `198.51.100.12` | `M143.5` | splice knife fire |
+| uw3 | UW 3 splice knife | `siemens` | `198.51.100.13` | `M155.6` | splice knife fire |
+| uw4 | UW 4 splice knife | `siemens` | `198.51.100.14` | `M148.7` | splice knife fire |
 
 Still to confirm on this machine:
 

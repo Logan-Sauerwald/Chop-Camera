@@ -23,7 +23,7 @@ _bootdir = os.path.join(_boot.name, "incoming")
 os.makedirs(_bootdir)
 _bootconf = os.path.join(_boot.name, "agg.conf")
 with open(_bootconf, "w") as fh:
-    fh.write(f'SITE="line3"\nNODES="uw1=1.2.3.4"\nINCOMING_DIR="{_bootdir}"\n')
+    fh.write(f'SITE="line3"\nNODES="uw1=192.0.2.4"\nINCOMING_DIR="{_bootdir}"\n')
 os.environ.setdefault("CHOPCAM_AGG_CONF", _bootconf)
 
 purge = importlib.import_module("purge")
@@ -42,7 +42,7 @@ class PurgeCase(unittest.TestCase):
 
     def write_conf(self, incoming=None, days=7, limit=85):
         with open(self.conf, "w") as fh:
-            fh.write(f'SITE="line3"\nNODES="uw1=1.2.3.4"\n'
+            fh.write(f'SITE="line3"\nNODES="uw1=192.0.2.4"\n'
                      f'INCOMING_DIR="{incoming or self.incoming}"\n'
                      f'RETENTION_DAYS="{days}"\nDISK_PCT_LIMIT="{limit}"\n')
         return self.conf

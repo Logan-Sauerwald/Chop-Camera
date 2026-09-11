@@ -21,7 +21,7 @@ CONF = """
 # chopcam test config
 NODE_NAME="chop3"
 PLC_TYPE="siemens"
-PLC_PATH="10.2.4.1"
+PLC_PATH="192.0.2.10"
 TRIGGER_TAG="DB100.DBX0.7"
 SIEMENS_RACK="0"
 SIEMENS_SLOT="2"

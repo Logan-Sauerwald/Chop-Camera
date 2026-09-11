@@ -26,7 +26,7 @@ os.makedirs(_incoming)
 _conf = os.path.join(_tmp.name, "agg.conf")
 with open(_conf, "w") as fh:
     fh.write('SITE="line3"\n'
-             'NODES="uw1=192.168.0.101 uw2=192.168.0.102"\n'
+             'NODES="uw1=198.51.100.101 uw2=198.51.100.102"\n'
              'NODE_PORT="8080"\n'
              f'INCOMING_DIR="{_incoming}"\n')
 os.environ["CHOPCAM_AGG_CONF"] = _conf
@@ -37,7 +37,7 @@ wall = importlib.import_module("wall")
 # imported it first (purge.py imports it too), in which case the cached module
 # carries that module's settings. Force the ones these tests rely on.
 wall.SITE = "line3"
-wall.NODES = wall.parse_nodes("uw1=192.168.0.101 uw2=192.168.0.102")
+wall.NODES = wall.parse_nodes("uw1=198.51.100.101 uw2=198.51.100.102")
 wall.INCOMING_DIR = _incoming
 # Derived at import time from whichever config got there first, so they are
 # pinned alongside INCOMING_DIR rather than left pointing at another test's
@@ -59,14 +59,14 @@ def _clear_clips():
 class TestParseNodes(unittest.TestCase):
 
     def test_parses_pairs_in_order(self):
-        nodes = wall.parse_nodes("uw1=192.168.0.4 uw2=192.168.0.8 uw3=192.168.0.13")
+        nodes = wall.parse_nodes("uw1=198.51.100.11 uw2=198.51.100.12 uw3=198.51.100.13")
         self.assertEqual([n["name"] for n in nodes], ["uw1", "uw2", "uw3"])
-        self.assertEqual(nodes[2]["address"], "192.168.0.13")
+        self.assertEqual(nodes[2]["address"], "198.51.100.13")
 
     def test_variable_node_count(self):
         # The number of Pis differs per install; nothing else should change.
         for count in (1, 4, 12):
-            raw = " ".join(f"n{i}=10.0.0.{i}" for i in range(count))
+            raw = " ".join(f"n{i}=192.0.2.{i}" for i in range(count))
             self.assertEqual(len(wall.parse_nodes(raw)), count)
 
     def test_empty_means_no_nodes(self):
@@ -74,7 +74,7 @@ class TestParseNodes(unittest.TestCase):
         self.assertEqual(wall.parse_nodes(None), [])
 
     def test_extra_whitespace_tolerated(self):
-        self.assertEqual(len(wall.parse_nodes("  uw1=10.0.0.1   uw2=10.0.0.2  ")), 2)
+        self.assertEqual(len(wall.parse_nodes("  uw1=192.0.2.1   uw2=192.0.2.2  ")), 2)
 
     def test_hostnames_allowed(self):
         nodes = wall.parse_nodes("uw1=chop-uw1.plant.local")
@@ -82,23 +82,23 @@ class TestParseNodes(unittest.TestCase):
 
     def test_missing_equals_rejected(self):
         with self.assertRaises(ValueError) as ctx:
-            wall.parse_nodes("uw1 192.168.0.4")
+            wall.parse_nodes("uw1 198.51.100.11")
         self.assertIn("name=address", str(ctx.exception))
 
     def test_empty_half_rejected(self):
-        for bad in ("uw1=", "=192.168.0.4"):
+        for bad in ("uw1=", "=198.51.100.11"):
             with self.assertRaises(ValueError, msg=bad):
                 wall.parse_nodes(bad)
 
     def test_duplicate_name_rejected(self):
         # Two tiles with one name would silently watch one camera.
         with self.assertRaises(ValueError) as ctx:
-            wall.parse_nodes("uw1=10.0.0.1 uw1=10.0.0.2")
+            wall.parse_nodes("uw1=192.0.2.1 uw1=192.0.2.2")
         self.assertIn("twice", str(ctx.exception))
 
     def test_unsafe_name_rejected(self):
         with self.assertRaises(ValueError):
-            wall.parse_nodes("uw 1=10.0.0.1")
+            wall.parse_nodes("uw 1=192.0.2.1")
 
 
 class TestClipNames(unittest.TestCase):
