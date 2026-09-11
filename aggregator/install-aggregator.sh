@@ -84,9 +84,10 @@ INCOMING_DIR=""
 # shellcheck source=/dev/null
 source "$CONF"
 INCOMING_DIR="${INCOMING_DIR:-/srv/chopcam/incoming}"
-mkdir -p "$INCOMING_DIR"
+mkdir -p "$INCOMING_DIR" "$INCOMING_DIR/keep"
 chown -R "$RUN_USER":"$RUN_USER" "$INCOMING_DIR"
 echo "    $INCOMING_DIR (owner $RUN_USER)"
+echo "    $INCOMING_DIR/keep (clips the purge never deletes)"
 
 echo "==> systemd"
 for unit in chopcam-wall.service chopcam-purge.service; do

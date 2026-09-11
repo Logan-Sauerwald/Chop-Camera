@@ -205,5 +205,102 @@ class TestDiskPressure(PurgeCase):
         self.assertEqual(len(self.names()), 1)
 
 
+class TestKeepDirectory(PurgeCase):
+    """The promise behind the "Keep this clip" button.
+
+    Retention deletes everything on a fixed schedule, so the first clip that
+    genuinely matters gets deleted a week later by a system working exactly as
+    designed. keep/ is the way out, and it is only worth anything if THIS file
+    can never touch it -- by age, or by disk pressure, or by any future change
+    that makes the scan recursive.
+    """
+
+    def kept(self, days_old, node="uw1", size=4096):
+        keep = os.path.join(self.incoming, purge.KEEP_DIRNAME)
+        os.makedirs(keep, exist_ok=True)
+        when = datetime.now(timezone.utc) - timedelta(days=days_old)
+        name = f"event_{when:%Y%m%d_%H%M%S}Z_line3-{node}.mp4"
+        with open(os.path.join(keep, name), "wb") as fh:
+            fh.write(b"x" * size)
+        return name
+
+    def kept_names(self):
+        return sorted(os.listdir(os.path.join(self.incoming,
+                                              purge.KEEP_DIRNAME)))
+
+    def test_kept_clips_outlive_retention(self):
+        old_kept = self.kept(400)              # more than a year past retention
+        doomed = self.clip(9)
+        self.write_conf(days=7)
+        self.run_purge()
+        self.assertEqual(self.kept_names(), [old_kept])
+        self.assertNotIn(doomed, self.names())
+
+    def test_kept_clips_survive_disk_pressure(self):
+        # The emergency path deletes oldest-first regardless of age. It must
+        # still not reach into keep/, even with nothing else left to free.
+        saved = purge.disk_pct
+        purge.disk_pct = lambda _p: 99          # never satisfied
+        try:
+            old_kept = self.kept(400)
+            self.clip(1)
+            self.write_conf(days=30, limit=85)
+            self.assertEqual(self.run_purge(), 0)     # must terminate
+        finally:
+            purge.disk_pct = saved
+        self.assertEqual(self.kept_names(), [old_kept])
+        self.assertEqual([n for n in self.names()
+                          if n.endswith(".mp4")], [])
+
+    def test_collect_never_returns_a_kept_clip(self):
+        self.kept(400)
+        self.clip(1)
+        collected = [e.name for e, _age in purge.collect(self.incoming)]
+        self.assertEqual(len(collected), 1)
+        self.assertNotIn(purge.KEEP_DIRNAME, collected)
+
+    def test_the_keep_directory_itself_is_never_a_candidate(self):
+        # It is not a .mp4 and not a file, so two separate tests already stop
+        # it -- this asserts the directory entry cannot be deleted even if one
+        # of them is ever loosened.
+        self.kept(400)
+        self.write_conf(days=1)
+        self.run_purge()
+        self.assertTrue(os.path.isdir(os.path.join(self.incoming,
+                                                   purge.KEEP_DIRNAME)))
+
+    def test_kept_stats_reports_what_is_protected(self):
+        self.kept(10, size=1000)
+        self.kept(20, node="uw2", size=2000)
+        self.clip(1, size=9999)                 # not kept, must not be counted
+        count, total = purge.kept_stats(self.incoming)
+        self.assertEqual(count, 2)
+        self.assertEqual(total, 3000)
+
+    def test_a_full_disk_with_only_kept_clips_left_is_reported(self):
+        # The state this feature can actually produce: nothing left to delete
+        # AND the disk full. The early return for "nothing deletable" used to
+        # skip the warning, which is the one moment anything could report it.
+        import io as _io
+        import contextlib
+        saved = purge.disk_pct
+        purge.disk_pct = lambda _p: 97
+        try:
+            self.kept(3)
+            self.write_conf(days=30, limit=85)
+            out = _io.StringIO()
+            with contextlib.redirect_stdout(out):
+                self.assertEqual(self.run_purge(), 0)
+        finally:
+            purge.disk_pct = saved
+        text = out.getvalue()
+        self.assertIn("disk 97% full", text)
+        self.assertIn("kept clip(s) hold", text)
+
+    def test_kept_stats_with_no_keep_directory(self):
+        # The normal case on a fresh install: nothing kept, no directory yet.
+        self.assertEqual(purge.kept_stats(self.incoming), (0, 0))
+
+
 if __name__ == "__main__":
     unittest.main()

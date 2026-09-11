@@ -30,6 +30,7 @@ HTTP (port LIVE_PORT)
   /            live preview page with framing grid
   /stream      MJPEG stream
   /healthz     JSON node status; 200 healthy, 503 degraded
+  /triggers    JSON log of recent triggers, whether each recorded or not
 """
 
 import asyncio
@@ -267,7 +268,11 @@ class FrameRing:
 
 frame_buffer = FrameRing(BUFFER_SECONDS, BUFFER_MAX_MB * 1024 * 1024)
 
-trigger_q: "Queue[tuple[float, datetime, str]]" = Queue()
+# (monotonic, wall clock, source, chop-log record). The record rides along
+# with the trigger so the writer can fill in the clip it produced by mutating
+# the object it was handed -- matching on a timestamp instead would tie for two
+# triggers in the same second.
+trigger_q: "Queue[tuple[float, datetime, str, dict]]" = Queue()
 _stop = threading.Event()
 
 # ---------------------------------------------------------------------------
@@ -296,6 +301,15 @@ _status = {
 _status_lock = threading.Lock()
 _started_mono = time.monotonic()
 
+# Every trigger since this service started, oldest first, served at /triggers.
+# The aggregator drains it into a durable chop log. Keeping a copy HERE is what
+# makes a chop that never produced a clip visible as a chop at all: the
+# aggregator can only see files, so a trigger that failed to record, or whose
+# clip is still being transcoded, would otherwise leave no trace anywhere.
+# Bounded because it lives in RAM -- the aggregator holds the long history.
+TRIGGER_LOG_MAX = max(10, _i("TRIGGER_LOG_MAX", 200))
+_trigger_log: "deque[dict]" = deque(maxlen=TRIGGER_LOG_MAX)
+
 
 def set_status(**kw):
     with _status_lock:
@@ -310,11 +324,40 @@ def bump_status(key, by=1):
 def fire_trigger(source):
     """Single entry point for every trigger source."""
     t_wall = datetime.now(timezone.utc)
-    trigger_q.put((time.monotonic(), t_wall, source))
+    record = {
+        # The aggregator dedupes on (node, utc), so this is the identity of the
+        # chop and must not be rewritten later.
+        "utc": t_wall.isoformat(timespec="seconds"),
+        "source": source,
+        # The name the clip will have once it lands on the aggregator. The
+        # basename survives transcode and shipping unchanged, so the writer can
+        # fill this in the moment the .mkv is muxed, long before the .mp4
+        # arrives -- which is what lets the chop log say "recorded, still on
+        # its way" rather than just "missing".
+        "clip": None,
+        "state": "recording",
+        "detail": "",
+    }
     with _status_lock:
         _status["trigger_count"] += 1
-        _status["trigger_last_utc"] = t_wall.isoformat(timespec="seconds")
+        _status["trigger_last_utc"] = record["utc"]
         _status["trigger_last_source"] = source
+        _trigger_log.append(record)
+    trigger_q.put((time.monotonic(), t_wall, source, record))
+
+
+def set_trigger_state(record, **kw):
+    """Update one chop-log record under the same lock that publishes it."""
+    if record is None:
+        return
+    with _status_lock:
+        record.update(kw)
+
+
+def trigger_log_snapshot():
+    """A copy of the chop log, oldest first, safe to serialise."""
+    with _status_lock:
+        return [dict(r) for r in _trigger_log]
 
 
 # ---------------------------------------------------------------------------
@@ -1024,6 +1067,18 @@ def health_snapshot():
             "count": st["trigger_count"],
             "last_utc": st["trigger_last_utc"],
             "last_source": st["trigger_last_source"],
+            # Full records are at /triggers; this is just how many are there.
+            "logged": len(_trigger_log),
+        },
+        # Where the trigger sits inside a clip. The aggregator's player draws a
+        # marker there, so it must come from the node that recorded it rather
+        # than being assumed to be the middle: a node configured with a longer
+        # pre-roll, or one whose ring buffer came up short, does not put the
+        # chop at 50%.
+        "clip_shape": {
+            "pre_seconds": PRE_SECONDS,
+            "post_seconds": POST_SECONDS,
+            "timestamp": CLIP_TIMESTAMP,
         },
         "clips": {
             "written": st["clips_written"],
@@ -1063,6 +1118,16 @@ class LiveHandler(BaseHTTPRequestHandler):
             # tell a wedged node from a working one without parsing JSON.
             self._send_bytes(body, "application/json",
                              200 if health["healthy"] else 503)
+            return
+
+        if self.path in ("/triggers", "/triggers.json"):
+            self._send_bytes(json.dumps({
+                "node": NODE_NAME,
+                "clip_id": CLIP_ID,
+                "utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "max": TRIGGER_LOG_MAX,
+                "triggers": trigger_log_snapshot(),
+            }, indent=2).encode("utf-8"), "application/json")
             return
 
         if self.path == "/stream":
@@ -1308,12 +1373,15 @@ def writer_loop():
 
     while not _stop.is_set():
         try:
-            t_mono, t_wall, source = trigger_q.get(timeout=0.5)
+            t_mono, t_wall, source, record = trigger_q.get(timeout=0.5)
         except Empty:
             continue
 
         if t_mono < recording_until_mono:
             log.info("trigger ignored (inside active recording window)")
+            set_trigger_state(record, state="coalesced",
+                              detail="fired while the previous chop was still "
+                                     "recording; covered by that clip")
             continue
         recording_until_mono = t_mono + POST_SECONDS
 
@@ -1331,6 +1399,9 @@ def writer_loop():
             log.warning("no frames captured for this trigger; skipping "
                         "(is the camera streaming? check /healthz)")
             bump_status("clips_failed")
+            set_trigger_state(record, state="failed",
+                              detail="no frames in the buffer -- camera not "
+                                     "streaming")
             continue
 
         # If the buffer had already discarded part of the pre-roll we would
@@ -1363,6 +1434,10 @@ def writer_loop():
         # CPU for ten minutes while the capture thread is feeding a 120 fps
         # buffer. postprocess.sh does it later at idle priority.
         base = clip_basename(t_wall)
+        # Named now, not when it lands: the basename survives transcode and
+        # shipping, so the chop log can point at the eventual .mp4 immediately.
+        set_trigger_state(record, clip=f"{base}.mp4", state="recorded",
+                          detail=f"{len(clip)} frames at {fps:.1f} fps")
         meta = {
             "title": f"{CLIP_ID} {t_wall.isoformat(timespec='seconds')}",
             "comment": (f"node={NODE_NAME} site={SITE or '-'} trigger={source} "
@@ -1371,7 +1446,9 @@ def writer_loop():
                         f"mux_fps={mux_fps} "
                         f"pre={PRE_SECONDS}s post={POST_SECONDS}s"),
         }
-        _mux(clip, mux_fps, OUTPUT_DIR, base, meta, measured_fps=fps)
+        if not _mux(clip, mux_fps, OUTPUT_DIR, base, meta, measured_fps=fps):
+            set_trigger_state(record, state="failed",
+                              detail="ffmpeg could not write the clip")
 
 
 def _mux(clip, fps, out_dir, base, meta, measured_fps=None):
@@ -1384,6 +1461,9 @@ def _mux(clip, fps, out_dir, base, meta, measured_fps=None):
     Written to a dot-prefixed .part name and renamed on success, so
     postprocess.sh can never pick up a half-written clip (its glob skips
     dotfiles) and a crash mid-write leaves nothing that looks complete.
+
+    Returns True if the clip is on disk, so the chop log can distinguish a
+    trigger that recorded from one that fired and produced nothing.
     """
     out_path = os.path.join(out_dir, f"{base}.mkv")
     tmp_path = os.path.join(out_dir, f".{base}.part.mkv")
@@ -1421,6 +1501,7 @@ def _mux(clip, fps, out_dir, base, meta, measured_fps=None):
                      size_mb, time.monotonic() - t0)
             set_status(clip_last=os.path.basename(out_path))
             bump_status("clips_written")
+            return True
         else:
             err.seek(0)
             log.error("ffmpeg mux failed (rc=%d): %s", rc,
@@ -1436,6 +1517,7 @@ def _mux(clip, fps, out_dir, base, meta, measured_fps=None):
                 os.remove(tmp_path)
             except OSError:
                 pass
+    return False
 
 
 # ---------------------------------------------------------------------------

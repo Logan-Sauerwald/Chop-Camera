@@ -423,6 +423,89 @@ a 120 fps clip is what makes playback stutter, so the player blanks their `src`
 on open and restores it on exit. Hiding the elements is not enough -- a hidden
 `<img>` keeps streaming.
 
+The chop log does the same. It also has to work the other way round: `/log`
+serves the same page with the log already open, so the tiles are *built* while
+an overlay is up, and `tile()` therefore starts them stopped rather than
+setting `src`. Without that, bookmarking `/log` on a laptop opened an MJPEG
+connection per camera that nothing was showing -- which over the plant switch
+is exactly the traffic the overlay exists to avoid.
+
+### The trigger marker is measured back from the end of the clip
+
+The player draws its own scrub bar because the browser's cannot be drawn on,
+and there is one thing worth drawing: where the chop actually was.
+
+It is placed at `duration - POST_SECONDS`, not at `PRE_SECONDS` from the start
+and not at the halfway point. The post-roll is recorded *after* the trigger and
+is always complete; the pre-roll comes out of the ring buffer and can be short
+if the buffer had not filled -- the "pre-roll short by Ns" warning is exactly
+that case -- which puts the chop *later* in the file than `PRE_SECONDS`.
+Measuring backwards is right in both cases and degrades to the midpoint only
+when the aggregator has not reached the node yet.
+
+`POST_SECONDS` comes from the node's own `/healthz` (`clip_shape`) rather than
+being assumed, so a camera configured with a different window is still marked
+correctly. The readout under the bar is in seconds *from the chop*, which is
+the number anyone reviewing a chop actually wants.
+
+### Keeping a clip moves the file, rather than flagging it
+
+Retention deletes everything past `RETENTION_DAYS`, so the first clip that
+genuinely matters is deleted a week later by a system working exactly as
+designed. `keep/` is the way out.
+
+It is a directory move, not a database flag or a sidecar file, because the
+guarantee then belongs to `purge.py` alone: its scan is non-recursive, so
+nothing inside `keep/` can appear in the list it deletes from, and it skips the
+directory by name as well in case that scan is ever made recursive. There is no
+state to get out of step with the filesystem, and `mv` from a shell has the
+same effect as the button.
+
+`keep/` lives *inside* `INCOMING_DIR` for two reasons: the move is then an
+atomic rename on one filesystem, so a clip is never briefly in neither place
+while the purge is running, and the systemd `ReadWritePaths` already covers it.
+`safe_clip_path()` resolves both directories, so every URL that worked before
+the move still works after it -- otherwise pressing Keep would break the thing
+it was pressed on.
+
+The cost is that kept clips are exempt from the disk-pressure path too, so
+enough of them can fill the disk. The purge reports what is protected on every
+run and says so explicitly when there is nothing left to free; that is the only
+place it could ever be noticed.
+
+### The chop log is fed from the nodes, not from the directory
+
+The aggregator can only see files. A trigger that produced no clip -- the
+camera had stopped, the buffer was empty, it landed inside the previous
+recording -- leaves no trace on disk anywhere, and that is precisely the case
+worth having a record of.
+
+So each node keeps a bounded ring of its own triggers and serves it at
+`/triggers`, and the aggregator drains that into a JSONL file. The node's copy
+is RAM-only and a few hundred entries; the aggregator's survives node reboots,
+node replacements, its own restarts, and the footage itself. A chop from three
+months ago is still on the record long after its clip was purged.
+
+The record travels *with* the trigger through the writer queue rather than
+being matched up afterwards by timestamp -- two triggers in the same second
+would tie -- and the clip name is filled in the moment the `.mkv` is muxed,
+because the basename survives transcode and shipping unchanged. That is what
+lets the log distinguish "recorded, still on its way" from "never recorded".
+
+What became of a clip is **not** stored. It is worked out on every read from
+what is on disk, so the log cannot go stale against the filesystem: a clip that
+was here yesterday and has since been purged reads as *purged* today with
+nothing rewriting anything. Distinguishing *purged* (older than retention, gone
+-- the system working) from *missing* (recorded, not delivered, not old enough
+to have been deleted -- a fault) is most of the value; without the age
+comparison every old entry would eventually look like a failure.
+
+Dedupe is on `(node, trigger time)`, so re-reading a node is free and a node
+replaying what it still remembers after a restart cannot create duplicates.
+Nodes are re-read when their trigger count moves, and otherwise every
+`CHOPLOG_SYNC_SECONDS`, because a chop goes `recording` -> `recorded` a
+post-roll later without the count changing.
+
 ### "Chop processing" comes from data the system already had
 
 Each node's `/healthz` reports when its trigger last fired; the aggregator knows
@@ -567,7 +650,8 @@ duration exactly 30.000000, zero frames lost.
    Also worth establishing: does the bit go true when the knife *fires*, or when
    the splice *sequence begins*? If the sequence starts seconds before the cut,
    the chop lands late in the clip and `PRE_SECONDS`/`POST_SECONDS` want
-   shifting.
+   shifting. The player's `CHOP` mark is how to check: play a real clip back and
+   see whether the mark lands on contact or well before it.
 
 3. **Tune the camera at the knife.** `measured` in the `saved` line is the
    number: a bench reading of 120.00 is a property of bench lighting, not of the
@@ -581,9 +665,16 @@ duration exactly 30.000000, zero frames lost.
    a prompt before enabling `SHIP_ENABLED`.
 
 5. **Run the aggregator on real hardware.** Pi 5 + NVMe. The wall, playback,
-   status and retention are built and verified against simulated nodes in every
-   state, but not on a real Pi 5 with real cameras. Drop `LIVE_FPS` to 5–8 per
-   node first.
+   the trigger marker, browsing older clips, keep, the chop log, status and
+   retention are built and verified against simulated nodes in every state --
+   in a real browser, driving the real page -- but not on a real Pi 5 with real
+   cameras. Drop `LIVE_FPS` to 5–8 per node first.
+
+   Worth checking on the real machine, in this order: the `CHOP` mark lines up
+   with contact in the picture; **Keep this clip** survives a `purge.py` run
+   (`python3 /opt/chopcam-agg/purge.py --dry-run` names what it would delete);
+   and the chop log fills in from the nodes (`curl http://<node>:8080/triggers`
+   if it does not).
 
    The one thing that could not be checked here: **H.264 decode in the
    browser.** Playwright's Chromium ships without proprietary codecs, so
@@ -597,8 +688,9 @@ duration exactly 30.000000, zero frames lost.
    disk-pressure guard means a wrong guess cannot fill the disk, but it decides
    what drive to buy.
 
-7. **Browsing older clips.** The wall plays the *latest* chop per camera;
-   `/clips` lists everything but there is no UI for picking an older one.
+7. **Authentication.** Anyone who can reach the aggregator can watch, download,
+   keep and release. Fine on an isolated controls network; worth revisiting if
+   that changes.
 
 ## Running the tests
 
